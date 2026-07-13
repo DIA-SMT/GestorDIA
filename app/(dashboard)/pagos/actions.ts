@@ -84,7 +84,8 @@ export async function updatePayment(paymentId: string, _prev: unknown, formData:
   revalidatePath(`/pagos/${paymentId}`);
   revalidatePath("/pagos");
   revalidatePath("/");
-  return { success: "Pago actualizado." };
+  // Al guardar, volvemos a la vista de ticket
+  redirect(`/pagos/${paymentId}`);
 }
 
 export async function deletePayment(paymentId: string) {

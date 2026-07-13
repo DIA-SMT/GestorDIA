@@ -339,10 +339,14 @@ export async function getPayment(id: string): Promise<(Payment & { receipts: Rec
   if (IS_DEMO) {
     const p = demoDb().payments.find((x) => x.id === id);
     if (!p) return null;
-    return { ...p, receipts: demoDb().receipts.filter((r) => r.payment_id === id) };
+    return hydratePayment(p) as Payment & { receipts: Receipt[] };
   }
   const supabase = await sb();
-  const { data } = await supabase.from("payments").select("*, receipts(*)").eq("id", id).single();
+  const { data } = await supabase
+    .from("payments")
+    .select("*, receipts(*), category:categories(*), service:services(*)")
+    .eq("id", id)
+    .single();
   return (data as Payment & { receipts: Receipt[] }) ?? null;
 }
 

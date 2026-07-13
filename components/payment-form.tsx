@@ -16,12 +16,14 @@ export default function PaymentForm({
   categories,
   payment,
   submitLabel = "Guardar pago",
+  cancelHref = "/pagos",
 }: {
   action: Action;
   services: Service[];
   categories: Category[];
   payment?: Payment;
   submitLabel?: string;
+  cancelHref?: string;
 }) {
   const [state, formAction, pending] = useActionState(action, {});
 
@@ -244,7 +246,7 @@ export default function PaymentForm({
         <button type="submit" className="btn btn-primary" disabled={pending}>
           {pending ? "Guardando…" : submitLabel}
         </button>
-        <Link href="/pagos" className="btn btn-ghost">
+        <Link href={cancelHref} className="btn btn-ghost">
           Cancelar
         </Link>
       </div>
