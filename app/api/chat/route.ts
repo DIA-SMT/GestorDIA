@@ -13,7 +13,39 @@ const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
 const MAX_PAYMENTS = 400; // tope de pagos en el contexto (los más recientes)
 const MAX_MESSAGES = 20; // tope de historial de conversación
 
-async function buildSystemPrompt(): Promise<string> {
+// Guía de uso de la app: le permite al asistente ayudar con "cómo hago X"
+// y con problemas comunes, además de responder sobre los datos.
+const APP_GUIDE = `
+GUÍA DE LA APP (usala para ayudar al usuario a usar gestorDIA):
+- Dashboard (/): KPIs del mes. Cada tarjeta se clickea y abre el detalle de qué compone el número. Abajo: alertas de pagos manuales por vencer, próximos débitos automáticos y últimos pagos.
+- Pagos (/pagos): lista de todos los pagos con filtros. Botón "+ Registrar pago" (/pagos/nuevo): formulario con servicio (opcional), categoría, descripción, monto y moneda, cotización (si es USD: cargarla hace que el pago sume en los totales en ARS), fecha, estado, medio de pago, y datos para rendición: proveedor, CUIT, tipo de comprobante, número. Se pueden adjuntar comprobantes (imagen o PDF).
+- Detalle de pago (/pagos/[id]): vista tipo ticket. Botón "Editar" para modificar cualquier campo (ahí se corrige una cotización faltante), adjuntar o borrar recibos, y eliminar el pago.
+- Servicios (/servicios): tarjetas por servicio con el gasto real acumulado (suma de pagos hechos) y el monto estimado por ciclo. "+ Nuevo servicio" (/servicios/nuevo): nombre, categoría, ciclo de facturación (mensual, anual, único, recarga a demanda, etc.), monto estimado, modo de pago (débito automático = se cobra solo e informa; manual = genera alerta para pagarlo), próxima renovación.
+- Detalle de servicio (/servicios/[id]): historial de pagos de ese servicio con total, y edición del servicio.
+- Rendición (/rendicion): elegir el mes arriba. Buscador por nombre/proveedor/monto y filtro por categoría. Se seleccionan pagos con los checkboxes (o "seleccionar todos"), se exportan con los botones CSV o PDF (exportan la selección, o todos los pendientes filtrados si no hay selección) y se marcan con "✓ Marcar como rendidos". Los rendidos pasan a la lista de abajo con fecha y botón "↩ Deshacer". El PDF sale con membrete y totales, listo para el contador.
+- Categorías (/categorias): crear categorías con nombre y color, editarlas o borrarlas.
+
+PROBLEMAS COMUNES:
+- "El gasto del mes en ARS da $0 o menos de lo esperado": hay pagos en USD sin cotización cargada; no se pueden convertir. Solución: entrar al pago → Editar → completar "Cotización".
+- "No encuentro un pago en rendición": verificar que el mes elegido sea el correcto (usa la fecha de pago) y que no esté ya abajo en la lista de Rendidos.
+- "Quiero deshacer una rendición": en /rendicion, sección Rendidos, botón "↩ Deshacer" en la fila.
+- "Un servicio aparece vencido": editar el servicio y actualizar la fecha de próxima renovación después de pagarlo (registrar el pago no la actualiza sola).
+- El asistente NO puede crear, editar ni borrar nada todavía: solo lee los datos. Para operar hay que usar las pantallas.
+`;
+
+const PAGE_LABELS: [RegExp, string][] = [
+  [/^\/$/, "Dashboard"],
+  [/^\/pagos\/nuevo/, "Registrar pago (formulario)"],
+  [/^\/pagos\/[^/]+/, "Detalle de un pago"],
+  [/^\/pagos/, "Lista de pagos"],
+  [/^\/servicios\/nuevo/, "Nuevo servicio (formulario)"],
+  [/^\/servicios\/[^/]+/, "Detalle de un servicio"],
+  [/^\/servicios/, "Lista de servicios"],
+  [/^\/rendicion/, "Rendición de cuentas"],
+  [/^\/categorias/, "Categorías"],
+];
+
+async function buildSystemPrompt(path: string | null): Promise<string> {
   const [payments, services, categories] = await Promise.all([
     listPayments({}),
     listServices(),
@@ -49,15 +81,20 @@ async function buildSystemPrompt(): Promise<string> {
   }));
 
   const hoy = new Date().toISOString().slice(0, 10);
+  const pageLabel = path ? PAGE_LABELS.find(([re]) => re.test(path))?.[1] ?? null : null;
 
   return [
     "Sos el asistente virtual de gestorDIA, la app de gestión de pagos, suscripciones y rendición de cuentas de la Dirección de Inteligencia Artificial de la Municipalidad de San Miguel de Tucumán.",
     `Hoy es ${hoy}.`,
     "Respondé siempre en español argentino, breve y concreto. Texto plano: sin markdown, sin asteriscos, sin tablas. Podés usar guiones para enumerar.",
-    "Respondé únicamente con la información de los DATOS de abajo. Si la respuesta no surge de los datos, decilo claramente en lugar de inventar.",
+    "Tenés dos funciones: (1) responder preguntas sobre los DATOS cargados, y (2) ayudar a usar la app con la GUÍA. Si la respuesta no surge de los datos o la guía, decilo claramente en lugar de inventar.",
     "Cuando des montos aclarás siempre la moneda. Si te piden totales, calculalos con cuidado sumando los pagos que correspondan.",
     'Sobre rendición: "rendido_el" con fecha significa que ese pago ya se presentó al contador; null significa pendiente de rendir.',
     "Los pagos con cotización null no tienen equivalente en ARS (conviene sugerir cargarla si preguntan por totales en pesos).",
+    APP_GUIDE,
+    pageLabel
+      ? `PÁGINA ACTUAL: el usuario está ahora mismo en "${pageLabel}" (${path}). Si pide ayuda sin dar contexto, asumí que es sobre esta pantalla.`
+      : "",
     "",
     `DATOS (JSON):`,
     `Categorías: ${JSON.stringify(categories.map((c) => c.name))}`,
@@ -86,17 +123,19 @@ export async function POST(req: Request) {
   }
 
   let messages: ChatMessage[];
+  let path: string | null = null;
   try {
     const body = await req.json();
     messages = (body.messages as ChatMessage[])
       .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
       .slice(-MAX_MESSAGES);
     if (messages.length === 0) throw new Error("empty");
+    if (typeof body.path === "string") path = body.path.slice(0, 120);
   } catch {
     return Response.json({ error: "Mensajes inválidos." }, { status: 400 });
   }
 
-  const system = await buildSystemPrompt();
+  const system = await buildSystemPrompt(path);
 
   const upstream = await fetch(OPENROUTER_URL, {
     method: "POST",

@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
+import { usePathname } from "next/navigation";
 
 interface Msg {
   role: "user" | "assistant";
@@ -19,6 +20,7 @@ const SUGERENCIAS = [
 ];
 
 export default function Assistant() {
+  const pathname = usePathname();
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
@@ -43,7 +45,7 @@ export default function Assistant() {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({ messages: history, path: pathname }),
       });
 
       if (!res.ok) {
@@ -77,34 +79,20 @@ export default function Assistant() {
         type="button"
         onClick={() => setOpen(!open)}
         aria-label={open ? "Cerrar asistente" : "Abrir asistente"}
-        style={{
-          position: "fixed",
-          bottom: "1.4rem",
-          right: "1.4rem",
-          zIndex: 40,
-          width: 58,
-          height: 58,
-          borderRadius: "50%",
-          background: "var(--grad-primary)",
-          border: "1px solid rgba(255,255,255,0.18)",
-          boxShadow: "0 10px 30px -8px rgba(10, 102, 242, 0.6)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          cursor: "pointer",
-        }}
+        title="Asistente DIA"
+        className={`assistant-fab${open ? " is-open" : ""}`}
       >
         {open ? (
-          <span style={{ color: "#fff", fontSize: "1.2rem", lineHeight: 1 }}>✕</span>
+          <span style={{ color: "#fff", fontSize: "1.25rem", lineHeight: 1 }}>✕</span>
         ) : (
-          <Image src="/brand/bot.png" alt="" width={34} height={24} style={{ filter: "brightness(3)" }} />
+          <Image src="/brand/bot.png" alt="" width={36} height={25} style={{ filter: "brightness(4)" }} />
         )}
       </button>
 
       {/* Panel de chat */}
       {open && (
         <div
-          className="card"
+          className="card assistant-panel"
           style={{
             position: "fixed",
             bottom: "5.6rem",
