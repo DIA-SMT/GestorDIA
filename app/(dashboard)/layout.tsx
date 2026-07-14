@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import Image from "next/image";
 import { getCurrentUser, IS_DEMO } from "@/lib/data";
 import Nav from "./nav";
+import Assistant from "@/components/assistant";
 
 export default async function DashboardLayout({
   children,
@@ -48,6 +49,7 @@ export default async function DashboardLayout({
         <Image src="/brand/muni.png" alt="" aria-hidden width={16} height={17} />
         Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán
       </footer>
+      <Assistant />
     </div>
   );
 }
