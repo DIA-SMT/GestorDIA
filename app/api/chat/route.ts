@@ -36,8 +36,9 @@ PROBLEMAS COMUNES:
 
 const TOOLS_GUIDE = `
 ACCIONES QUE PODÉS EJECUTAR (herramientas):
-- crear_pago: registrar un gasto/pago nuevo.
+- crear_pago: registrar un gasto/pago suelto nuevo.
 - crear_servicio: dar de alta un servicio/suscripción.
+- pagar_servicio: cuando el usuario diga que YA PAGÓ un servicio existente (o toque "Ya lo pagué"), registra el pago de ese servicio y adelanta su próxima fecha de cobro un ciclo. Pasá el nombre del servicio; el monto por defecto es el estimado, salvo que el usuario aclare otro.
 - marcar_rendido: marcar pagos como rendidos al contador (usá los "id" de los pagos que figuran en los DATOS). Después el usuario puede descargar el PDF de esa rendición desde el chat.
 Cuando el usuario pida una de estas cosas, llamá a la herramienta directamente con los datos que dio: la app le muestra una tarjeta de confirmación con todo lo interpretado ANTES de ejecutar, así que no pidas confirmación por texto. Solo preguntá si falta un dato obligatorio (ej: el monto) o si no queda claro a qué pago se refiere.
 Lo que todavía NO podés hacer: editar o borrar pagos/servicios, adjuntar archivos, deshacer rendiciones. Para eso indicá cómo hacerlo en las pantallas.

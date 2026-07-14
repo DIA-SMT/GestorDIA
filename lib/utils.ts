@@ -66,6 +66,25 @@ export function upcomingRenewal(
   return `${y}-${m}-${day}`;
 }
 
+// Suma exactamente un ciclo a una fecha (para calcular la próxima renovación
+// después de pagar la actual). Ciclos no recurrentes devuelven null.
+export function nextCycleDate(
+  date: string | null | undefined,
+  cycle: BillingCycle
+): string | null {
+  if (!date) return null;
+  if (cycle === "one_time" || cycle === "on_demand" || cycle === "custom") return null;
+  const d = new Date(date + "T00:00:00");
+  if (cycle === "weekly") d.setDate(d.getDate() + 7);
+  else if (cycle === "monthly") d.setMonth(d.getMonth() + 1);
+  else if (cycle === "quarterly") d.setMonth(d.getMonth() + 3);
+  else if (cycle === "yearly") d.setFullYear(d.getFullYear() + 1);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 // Próxima fecha de cobro "efectiva" de un servicio, para alertas y vistas:
 // - Débito automático recurrente: se adelanta al próximo cobro futuro (ya se debitó).
 // - Pago manual: se deja la fecha original (si venció, sigue siendo alerta de acción).

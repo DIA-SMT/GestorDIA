@@ -278,6 +278,21 @@ export async function updateService(id: string, input: ServiceInput): Promise<{ 
   return { error: error?.message };
 }
 
+// Actualiza solo la próxima fecha de cobro de un servicio (al registrar un pago)
+export async function setServiceRenewal(id: string, nextRenewalDate: string | null): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const s = demoDb().services.find((x) => x.id === id);
+    if (s) {
+      s.next_renewal_date = nextRenewalDate;
+      s.updated_at = nowIso();
+    }
+    return {};
+  }
+  const supabase = await sb();
+  const { error } = await supabase.from("services").update({ next_renewal_date: nextRenewalDate }).eq("id", id);
+  return { error: error?.message };
+}
+
 export async function deleteService(id: string): Promise<void> {
   if (IS_DEMO) {
     const db = demoDb();

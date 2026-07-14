@@ -118,10 +118,6 @@ export default async function DashboardPage() {
                     {s.category && <CategoryTag name={s.category.name} color={s.category.color} />}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-                    <span style={{ fontWeight: 700, fontSize: "1rem" }}>
-                      {formatMoney(s.expected_amount, s.currency)}{" "}
-                      <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
-                    </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
                       {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
                     </span>
@@ -164,10 +160,6 @@ export default async function DashboardPage() {
                     {s.category && <CategoryTag name={s.category.name} color={s.category.color} />}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                    <span style={{ fontWeight: 600 }}>
-                      {formatMoney(s.expected_amount, s.currency)}{" "}
-                      <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
-                    </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
                       {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
                     </span>
@@ -253,7 +245,7 @@ function serviceRow(s: Service) {
     meta: `${formatDate(date)} · ${BILLING_CYCLE_LABELS[s.billing_cycle]}${
       d == null ? "" : d < 0 ? ` · venció hace ${-d}d` : d === 0 ? " · vence hoy" : ` · en ${d}d`
     }`,
-    amount: s.expected_amount != null ? `${formatMoney(s.expected_amount, s.currency)} estimado` : "—",
+    amount: "",
   };
 }
 
