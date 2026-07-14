@@ -1,7 +1,9 @@
 @import "tailwindcss";
 
 /* ============================================================
-   gestorDIA — sistema de diseño "liquid" (azul / violeta / cyan)
+   gestorDIA — sistema de diseño "liquid"
+   Identidad: Dirección de IA · Municipalidad de San Miguel de
+   Tucumán (azul #0a66f2 · celeste #2fa9ff · amarillo #f4d90a)
    ============================================================ */
 :root {
   --bg: #030407;
@@ -17,13 +19,13 @@
   --text-muted: #9aa3ba;
   --text-faint: #626b83;
 
-  /* acentos */
-  --primary: #818cf8;
-  --primary-2: #22d3ee;
-  --violet: #a855f7;
+  /* acentos (marca) */
+  --primary: #4da3ff;
+  --primary-2: #2fa9ff;
+  --accent: #f4d90a;
 
-  --grad-primary: linear-gradient(120deg, #4f46e5 0%, #6d28d9 100%);
-  --grad-text: linear-gradient(120deg, #a5b4fc 0%, #c4b5fd 100%);
+  --grad-primary: linear-gradient(120deg, #0a66f2 0%, #2fa9ff 100%);
+  --grad-text: linear-gradient(120deg, #8ecbff 0%, #4da3ff 100%);
 }
 
 * {
@@ -45,8 +47,8 @@ h1,
 h2,
 h3,
 .font-display {
-  font-family: var(--font-display, var(--font-body, system-ui));
-  letter-spacing: -0.02em;
+  font-family: var(--font-body, system-ui);
+  letter-spacing: -0.015em;
 }
 
 @theme inline {
@@ -71,8 +73,8 @@ button {
   z-index: -1;
   overflow: hidden;
   background:
-    radial-gradient(1300px 800px at 10% -15%, rgba(76, 29, 149, 0.2), transparent 55%),
-    radial-gradient(1100px 700px at 108% 5%, rgba(8, 100, 140, 0.14), transparent 52%),
+    radial-gradient(1300px 800px at 10% -15%, rgba(10, 70, 170, 0.22), transparent 55%),
+    radial-gradient(1100px 700px at 108% 5%, rgba(20, 110, 200, 0.14), transparent 52%),
     var(--bg);
 }
 .liquid-bg::after {
@@ -96,7 +98,7 @@ button {
   height: 52vw;
   left: -14vw;
   top: -14vw;
-  background: radial-gradient(circle at 50% 50%, rgba(109, 40, 217, 0.65) 0%, rgba(67, 56, 202, 0.3) 38%, transparent 68%);
+  background: radial-gradient(circle at 50% 50%, rgba(10, 102, 242, 0.6) 0%, rgba(9, 60, 160, 0.3) 38%, transparent 68%);
   animation: drift1 26s ease-in-out infinite;
 }
 .blob-2 {
@@ -104,7 +106,7 @@ button {
   height: 46vw;
   right: -16vw;
   top: -4vw;
-  background: radial-gradient(circle at 50% 50%, rgba(14, 116, 144, 0.55) 0%, rgba(30, 64, 175, 0.25) 40%, transparent 68%);
+  background: radial-gradient(circle at 50% 50%, rgba(47, 169, 255, 0.45) 0%, rgba(15, 90, 190, 0.25) 40%, transparent 68%);
   animation: drift2 30s ease-in-out infinite;
 }
 .blob-3 {
@@ -112,8 +114,8 @@ button {
   height: 44vw;
   left: 30vw;
   bottom: -22vw;
-  background: radial-gradient(circle at 50% 50%, rgba(124, 58, 237, 0.5) 0%, rgba(76, 29, 149, 0.22) 40%, transparent 68%);
-  opacity: 0.2;
+  background: radial-gradient(circle at 50% 50%, rgba(244, 217, 10, 0.28) 0%, rgba(180, 150, 10, 0.1) 40%, transparent 68%);
+  opacity: 0.14;
   animation: drift3 34s ease-in-out infinite;
 }
 @keyframes drift1 {
@@ -194,10 +196,10 @@ a.card:hover {
 .btn-primary {
   background: var(--grad-primary);
   color: #fff;
-  box-shadow: 0 8px 20px -12px rgba(99, 102, 241, 0.5);
+  box-shadow: 0 8px 20px -12px rgba(10, 102, 242, 0.55);
 }
 .btn-primary:hover {
-  box-shadow: 0 10px 24px -10px rgba(99, 102, 241, 0.6);
+  box-shadow: 0 10px 24px -10px rgba(47, 169, 255, 0.6);
   transform: translateY(-1px);
 }
 .btn-primary:disabled {
@@ -237,8 +239,8 @@ a.card:hover {
 .input:focus,
 .select:focus,
 .textarea:focus {
-  border-color: rgba(129, 140, 248, 0.6);
-  box-shadow: 0 0 0 3px rgba(129, 140, 248, 0.18);
+  border-color: rgba(77, 163, 255, 0.6);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.18);
   background: rgba(255, 255, 255, 0.05);
 }
 .select option {

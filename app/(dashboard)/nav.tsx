@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { signOut } from "./actions";
 
@@ -40,8 +41,15 @@ export default function Nav({ email }: { email: string }) {
           gap: "1.5rem",
         }}
       >
-        <Link href="/" className="font-display" style={{ fontWeight: 700, fontSize: "1.1rem", letterSpacing: "-0.03em" }}>
-          gestor<span className="grad-text">DIA</span>
+        <Link
+          href="/"
+          className="font-display"
+          style={{ display: "flex", alignItems: "center", gap: "0.6rem", fontWeight: 700, fontSize: "1.1rem", letterSpacing: "-0.03em" }}
+        >
+          <Image src="/brand/muni.png" alt="Municipalidad de San Miguel de Tucumán" width={26} height={27} priority />
+          <span>
+            gestor<span className="grad-text">DIA</span>
+          </span>
         </Link>
 
         <nav style={{ display: "flex", gap: "0.15rem", flex: 1, overflowX: "auto" }}>

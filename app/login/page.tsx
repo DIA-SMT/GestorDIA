@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import Image from "next/image";
 import { signIn, signUp } from "./actions";
 
 const initialState: { error?: string; success?: string } = {};
@@ -13,11 +14,12 @@ export default function LoginPage() {
   return (
     <main
       style={{
+        position: "relative",
         minHeight: "100vh",
         display: "grid",
         gridTemplateColumns: "1fr",
         placeItems: "center",
-        padding: "1.5rem",
+        padding: "1.5rem 1.5rem 4rem",
       }}
     >
       <div
@@ -33,12 +35,14 @@ export default function LoginPage() {
       >
         {/* Hero */}
         <div className="login-hero">
-          <span
-            className="badge"
-            style={{ background: "var(--glass)", border: "1px solid var(--glass-border)", color: "var(--text-muted)", marginBottom: "1.4rem" }}
-          >
-            Pagos · Suscripciones · Rendición
-          </span>
+          <Image
+            src="/brand/logo-dia.png"
+            alt="Dirección de IA"
+            width={220}
+            height={93}
+            priority
+            style={{ marginBottom: "1.6rem", height: "auto" }}
+          />
           <h1
             className="font-display"
             style={{ fontSize: "clamp(2.6rem, 6vw, 4.2rem)", fontWeight: 700, lineHeight: 1.02, margin: 0 }}
@@ -50,10 +54,24 @@ export default function LoginPage() {
             categoría, seguí las renovaciones, guardá los comprobantes y tené la
             rendición lista para el contador.
           </p>
+          <span
+            className="badge"
+            style={{ background: "var(--glass)", border: "1px solid var(--glass-border)", color: "var(--text-muted)", marginTop: "1.4rem" }}
+          >
+            Pagos · Suscripciones · Rendición
+          </span>
         </div>
 
         {/* Formulario */}
-        <div className="card" style={{ padding: "2rem" }}>
+        <div className="card" style={{ padding: "2rem", position: "relative" }}>
+          <Image
+            src="/brand/bot.png"
+            alt=""
+            aria-hidden
+            width={54}
+            height={38}
+            style={{ position: "absolute", top: "1.6rem", right: "1.6rem", opacity: 0.85 }}
+          />
           <h2 className="font-display" style={{ fontSize: "1.35rem", fontWeight: 600 }}>
             {mode === "signin" ? "Iniciar sesión" : "Crear cuenta"}
           </h2>
@@ -98,11 +116,32 @@ export default function LoginPage() {
         </div>
       </div>
 
+      <footer
+        style={{
+          position: "absolute",
+          bottom: "1.2rem",
+          left: 0,
+          right: 0,
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: "0.55rem",
+          fontSize: "0.78rem",
+          color: "var(--text-faint)",
+          textAlign: "center",
+          padding: "0 1rem",
+        }}
+      >
+        <Image src="/brand/muni.png" alt="" aria-hidden width={16} height={17} />
+        Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán
+      </footer>
+
       <style>{`
         @media (max-width: 780px) {
           .login-grid { grid-template-columns: 1fr !important; }
           .login-hero { text-align: center; }
           .login-hero p { margin-left: auto; margin-right: auto; }
+          .login-hero img { margin-left: auto; margin-right: auto; }
         }
       `}</style>
     </main>

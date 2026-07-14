@@ -24,7 +24,7 @@ export default function AddCategory() {
       </div>
       <div>
         <span className="label">Color</span>
-        <input name="color" type="color" defaultValue="#6366f1" style={{ width: 48, height: 40, border: "1px solid var(--glass-border)", borderRadius: 8, background: "rgba(255,255,255,0.045)" }} />
+        <input name="color" type="color" defaultValue="#2fa9ff" style={{ width: 48, height: 40, border: "1px solid var(--glass-border)", borderRadius: 8, background: "rgba(255,255,255,0.045)" }} />
       </div>
       <button type="submit" className="btn btn-primary" disabled={pending}>
         {pending ? "…" : "Agregar"}
