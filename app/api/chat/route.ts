@@ -4,7 +4,7 @@
 // muestra como tarjeta de confirmación; /api/chat/execute las ejecuta.
 
 import { getCurrentUser, listPayments, listServices, listCategories } from "@/lib/data";
-import { toARS, daysUntil } from "@/lib/utils";
+import { toARS, daysUntil, effectiveRenewal } from "@/lib/utils";
 import { BILLING_CYCLE_LABELS, RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS, SERVICE_STATUS_LABELS } from "@/lib/types";
 import { TOOL_DEFS, buildProposal } from "@/lib/assistant-tools";
 
@@ -88,25 +88,29 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
     moneda: s.currency,
     estado: SERVICE_STATUS_LABELS[s.status],
     modo_pago: s.payment_mode === "manual" ? "manual (hay que pagarlo)" : "débito automático",
-    proxima_renovacion: s.next_renewal_date,
+    proxima_renovacion: effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode),
   }));
 
   const hoy = new Date().toISOString().slice(0, 10);
   const pageLabel = path ? PAGE_LABELS.find(([re]) => re.test(path))?.[1] ?? null : null;
 
-  // Alertas activas: renovaciones vencidas o en los próximos 7 días
+  // Alertas activas: próximos cobros (≤30 días). Automáticos usan el próximo
+  // débito futuro (el anterior ya se cobró); manuales incluyen vencidos.
   const alertas = services
     .filter((s) => s.status === "active" && s.next_renewal_date)
-    .map((s) => ({ s, d: daysUntil(s.next_renewal_date)! }))
-    .filter(({ d }) => d <= 7)
+    .map((s) => {
+      const fecha = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode)!;
+      return { s, fecha, d: daysUntil(fecha)!, auto: s.payment_mode !== "manual" };
+    })
+    .filter(({ d, auto }) => (auto ? d >= 0 && d <= 30 : d <= 30))
     .sort((a, b) => a.d - b.d)
-    .map(({ s, d }) => ({
+    .map(({ s, fecha, d, auto }) => ({
       servicio: s.name,
-      fecha: s.next_renewal_date,
-      situacion: d < 0 ? `vencido hace ${-d} días` : d === 0 ? "vence hoy" : `vence en ${d} días`,
+      fecha,
+      situacion: d < 0 ? `vencido hace ${-d} días` : d === 0 ? (auto ? "se debita hoy" : "vence hoy") : auto ? `se debita en ${d} días` : `vence en ${d} días`,
       monto_estimado: s.expected_amount,
       moneda: s.currency,
-      modo: s.payment_mode === "manual" ? "manual (hay que pagarlo)" : "débito automático",
+      modo: auto ? "débito automático" : "manual (hay que pagarlo)",
     }));
 
   return [
@@ -125,7 +129,7 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
     "",
     `DATOS (JSON):`,
     alertas.length > 0
-      ? `ALERTAS ACTIVAS (renovaciones vencidas o en ≤7 días — priorizá esto si preguntan qué hay pendiente o por vencer): ${JSON.stringify(alertas)}`
+      ? `ALERTAS ACTIVAS (próximos cobros en ≤30 días o vencidos — priorizá esto si preguntan qué hay pendiente o por vencer): ${JSON.stringify(alertas)}`
       : "ALERTAS ACTIVAS: ninguna por ahora.",
     `Categorías: ${JSON.stringify(categories.map((c) => c.name))}`,
     `Servicios: ${JSON.stringify(servicios)}`,

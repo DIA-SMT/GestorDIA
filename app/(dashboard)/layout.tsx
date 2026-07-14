@@ -1,7 +1,7 @@
 import { redirect } from "next/navigation";
 import Image from "next/image";
 import { getCurrentUser, listServices, IS_DEMO } from "@/lib/data";
-import { daysUntil } from "@/lib/utils";
+import { daysUntil, effectiveRenewal } from "@/lib/utils";
 import Nav from "./nav";
 import Assistant from "@/components/assistant";
 
@@ -13,21 +13,25 @@ export default async function DashboardLayout({
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  // Alertas para el asistente: renovaciones en los próximos 7 días o vencidas
+  // Alertas para el asistente: próximos cobros (≤30 días).
+  // Automáticos: el próximo débito futuro. Manuales: incluye vencidos (hay que pagarlos).
   const services = await listServices();
   const alerts = services
     .filter((s) => s.status === "active" && s.next_renewal_date)
-    .map((s) => ({ s, d: daysUntil(s.next_renewal_date)! }))
-    .filter(({ d }) => d <= 7)
+    .map((s) => {
+      const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode)!;
+      return { s, date, d: daysUntil(date)!, auto: s.payment_mode !== "manual" };
+    })
+    .filter(({ d, auto }) => (auto ? d >= 0 && d <= 30 : d <= 30))
     .sort((a, b) => a.d - b.d)
-    .map(({ s, d }) => ({
+    .map(({ s, date, d, auto }) => ({
       id: s.id,
       name: s.name,
-      date: s.next_renewal_date!,
+      date,
       days: d,
       amount: s.expected_amount,
       currency: s.currency,
-      auto: s.payment_mode !== "manual",
+      auto,
     }));
 
   return (

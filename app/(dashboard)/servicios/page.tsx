@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { listServices, servicePaidTotals } from "@/lib/data";
-import { formatMoney, formatDate, daysUntil } from "@/lib/utils";
+import { formatMoney, formatDate, daysUntil, effectiveRenewal } from "@/lib/utils";
 import { ServiceStatusBadge, CategoryTag } from "@/components/badges";
 import { BILLING_CYCLE_LABELS } from "@/lib/types";
 
@@ -28,7 +28,8 @@ export default async function ServiciosPage() {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "1.25rem" }}>
           {services.map((s) => {
-            const d = daysUntil(s.next_renewal_date);
+            const renewalDate = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+            const d = daysUntil(renewalDate);
             const spend = spendByService[s.id] ?? [];
             return (
               <Link key={s.id} href={`/servicios/${s.id}`} className="card" style={{ padding: "1.5rem", display: "grid", gap: "0.85rem", opacity: s.status === "cancelled" ? 0.6 : 1 }}>
@@ -75,12 +76,22 @@ export default async function ServiciosPage() {
                   <span>
                     {s.billing_cycle === "on_demand"
                       ? "Sin fecha fija de cobro"
-                      : `Renueva: ${formatDate(s.next_renewal_date)}`}
+                      : d !== null && d < 0 && s.payment_mode !== "manual"
+                      ? "Último cobro:"
+                      : "Renueva:"}{" "}
+                    {s.billing_cycle !== "on_demand" && formatDate(renewalDate)}
                   </span>
                   {s.billing_cycle !== "on_demand" && s.status === "active" && d !== null && d <= 30 && (
-                    <span className="badge" style={{ background: d <= 3 ? "rgba(239,68,68,.15)" : "rgba(245,158,11,.15)", color: d <= 3 ? "#f87171" : "#fbbf24" }}>
-                      {d < 0 ? `Vencido ${-d}d` : d === 0 ? "Hoy" : `${d}d`}
-                    </span>
+                    d < 0 && s.payment_mode !== "manual" ? (
+                      // Cobro único automático ya debitado: no es un vencimiento
+                      <span className="badge" style={{ background: "rgba(148,163,184,.12)", color: "var(--text-muted)" }}>
+                        Ya se cobró
+                      </span>
+                    ) : (
+                      <span className="badge" style={{ background: d <= 3 ? "rgba(239,68,68,.15)" : "rgba(245,158,11,.15)", color: d <= 3 ? "#f87171" : "#fbbf24" }}>
+                        {d < 0 ? `Vencido ${-d}d` : d === 0 ? "Hoy" : `${d}d`}
+                      </span>
+                    )
                   )}
                 </div>
               </Link>

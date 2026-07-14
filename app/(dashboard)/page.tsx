@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { monthPaidPayments, listServices, recentPayments as fetchRecent } from "@/lib/data";
-import { formatMoney, formatDate, daysUntil, toARS } from "@/lib/utils";
+import { formatMoney, formatDate, daysUntil, effectiveRenewal, toARS } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import KpiCards, { type KpiDef } from "@/components/kpi-cards";
 import { BILLING_CYCLE_LABELS, type Payment, type Service } from "@/lib/types";
@@ -29,13 +29,18 @@ export default async function DashboardPage() {
     .reduce((acc, p) => acc + Number(p.amount), 0);
 
   // Próximos vencimientos (30 días), separados por cómo se pagan:
-  // manual = lo tenés que pagar vos (alerta) / automatic = se debita solo (informativo)
-  const upcoming = activeServices.filter((s) => {
-    const d = daysUntil(s.next_renewal_date);
-    return d !== null && d <= 30;
+  // manual = lo tenés que pagar vos (alerta, incluye vencidos) /
+  // automatic = se debita solo (informativo, usa el próximo cobro futuro)
+  const withRenewal = activeServices.map((s) => {
+    const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+    return { s, date, d: date == null ? null : daysUntil(date) };
   });
-  const toPayManually = upcoming.filter((s) => s.payment_mode === "manual");
-  const autoDebit = upcoming.filter((s) => s.payment_mode !== "manual");
+  const toPayManually = withRenewal.filter(
+    (r) => r.s.payment_mode === "manual" && r.d != null && r.d <= 30
+  );
+  const autoDebit = withRenewal.filter(
+    (r) => r.s.payment_mode !== "manual" && r.d != null && r.d >= 0 && r.d <= 30
+  );
 
   return (
     <div style={{ display: "grid", gap: "2.25rem" }}>
@@ -76,15 +81,15 @@ export default async function DashboardPage() {
             hint: "Pagos manuales en 30 días",
             accent: toPayManually.length > 0,
             note: "Servicios activos de pago manual que renuevan en los próximos 30 días (o ya vencieron).",
-            rows: toPayManually.map((s) => serviceRow(s)),
+            rows: toPayManually.map(({ s }) => serviceRow(s)),
           },
           {
             key: "auto",
             label: "Se debitan solos",
             value: String(autoDebit.length),
             hint: "Débitos automáticos en 30 días",
-            note: "Servicios activos con débito automático que renuevan en los próximos 30 días.",
-            rows: autoDebit.map((s) => serviceRow(s)),
+            note: "Servicios activos con débito automático. Muestra el próximo cobro (los ya debitados se adelantan al siguiente).",
+            rows: autoDebit.map(({ s }) => serviceRow(s)),
           },
         ] satisfies KpiDef[]}
       />
@@ -104,8 +109,8 @@ export default async function DashboardPage() {
             </span>
           </div>
           <div style={{ display: "grid", gap: "0.5rem" }}>
-            {toPayManually.map((s) => {
-              const d = daysUntil(s.next_renewal_date)!;
+            {toPayManually.map(({ s, date, d }) => {
+              const dd = d ?? 0;
               return (
                 <div key={s.id} style={{ ...rowStyle, background: "rgba(251,191,36,.06)", border: "1px solid rgba(251,191,36,.15)" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
@@ -118,16 +123,16 @@ export default async function DashboardPage() {
                       <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
                     </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-                      {formatDate(s.next_renewal_date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
+                      {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
                     </span>
                     <span
                       className="badge"
                       style={{
-                        background: d <= 3 ? "rgba(239,68,68,.18)" : "rgba(251,191,36,.15)",
-                        color: d <= 3 ? "#f87171" : "#fbbf24",
+                        background: dd <= 3 ? "rgba(239,68,68,.18)" : "rgba(251,191,36,.15)",
+                        color: dd <= 3 ? "#f87171" : "#fbbf24",
                       }}
                     >
-                      {d < 0 ? `Venció hace ${-d}d` : d === 0 ? "¡Vence hoy!" : `En ${d} días`}
+                      {dd < 0 ? `Venció hace ${-dd}d` : dd === 0 ? "¡Vence hoy!" : `En ${dd} días`}
                     </span>
                     <Link href="/pagos/nuevo" className="btn btn-primary" style={{ padding: "0.35rem 0.75rem", fontSize: "0.8rem" }}>
                       Ya lo pagué
@@ -150,8 +155,8 @@ export default async function DashboardPage() {
           <Empty>No hay débitos automáticos en los próximos 30 días.</Empty>
         ) : (
           <div style={{ display: "grid", gap: "0.5rem" }}>
-            {autoDebit.map((s) => {
-              const d = daysUntil(s.next_renewal_date)!;
+            {autoDebit.map(({ s, date, d }) => {
+              const dd = d ?? 0;
               return (
                 <div key={s.id} style={rowStyle}>
                   <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
@@ -164,10 +169,10 @@ export default async function DashboardPage() {
                       <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
                     </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-                      {formatDate(s.next_renewal_date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
+                      {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
                     </span>
                     <span className="badge" style={{ background: "rgba(148,163,184,.12)", color: "var(--text-muted)" }}>
-                      {d < 0 ? `Hace ${-d}d` : d === 0 ? "Hoy" : `En ${d} días`}
+                      {dd === 0 ? "Hoy" : `En ${dd} días`}
                     </span>
                   </div>
                 </div>
@@ -239,12 +244,13 @@ function paymentRow(p: Payment) {
 
 // Fila de detalle de un servicio con renovación próxima
 function serviceRow(s: Service) {
-  const d = daysUntil(s.next_renewal_date);
+  const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+  const d = daysUntil(date);
   return {
     id: s.id,
     href: `/servicios/${s.id}`,
     title: s.name,
-    meta: `${formatDate(s.next_renewal_date)} · ${BILLING_CYCLE_LABELS[s.billing_cycle]}${
+    meta: `${formatDate(date)} · ${BILLING_CYCLE_LABELS[s.billing_cycle]}${
       d == null ? "" : d < 0 ? ` · venció hace ${-d}d` : d === 0 ? " · vence hoy" : ` · en ${d}d`
     }`,
     amount: s.expected_amount != null ? `${formatMoney(s.expected_amount, s.currency)} estimado` : "—",
