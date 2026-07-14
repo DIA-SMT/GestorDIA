@@ -213,6 +213,45 @@ export async function getServicePayments(serviceId: string): Promise<Payment[]> 
   return (data ?? []) as Payment[];
 }
 
+// Gasto real acumulado por servicio (solo pagos "paid"), separado por moneda
+// para no mezclar ARS y USD sin tipo de cambio.
+export interface ServiceSpendTotal {
+  currency: CurrencyCode;
+  total: number;
+  count: number;
+}
+
+function aggregateSpend(
+  rows: { service_id: string | null; amount: number; currency: CurrencyCode }[]
+): Record<string, ServiceSpendTotal[]> {
+  const byService: Record<string, ServiceSpendTotal[]> = {};
+  for (const r of rows) {
+    if (!r.service_id) continue;
+    const totals = (byService[r.service_id] ??= []);
+    const t = totals.find((x) => x.currency === r.currency);
+    if (t) {
+      t.total += Number(r.amount);
+      t.count += 1;
+    } else {
+      totals.push({ currency: r.currency, total: Number(r.amount), count: 1 });
+    }
+  }
+  return byService;
+}
+
+export async function servicePaidTotals(): Promise<Record<string, ServiceSpendTotal[]>> {
+  if (IS_DEMO) {
+    return aggregateSpend(demoDb().payments.filter((p) => p.status === "paid"));
+  }
+  const supabase = await sb();
+  const { data } = await supabase
+    .from("payments")
+    .select("service_id, amount, currency")
+    .eq("status", "paid")
+    .not("service_id", "is", null);
+  return aggregateSpend((data ?? []) as { service_id: string; amount: number; currency: CurrencyCode }[]);
+}
+
 export async function createService(input: ServiceInput, userId: string | null): Promise<{ id?: string; error?: string }> {
   if (IS_DEMO) {
     const id = newId("srv");

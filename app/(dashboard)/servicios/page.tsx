@@ -1,11 +1,11 @@
 import Link from "next/link";
-import { listServices } from "@/lib/data";
+import { listServices, servicePaidTotals } from "@/lib/data";
 import { formatMoney, formatDate, daysUntil } from "@/lib/utils";
 import { ServiceStatusBadge, CategoryTag } from "@/components/badges";
 import { BILLING_CYCLE_LABELS } from "@/lib/types";
 
 export default async function ServiciosPage() {
-  const services = await listServices();
+  const [services, spendByService] = await Promise.all([listServices(), servicePaidTotals()]);
   const active = services.filter((s) => s.status === "active");
 
   return (
@@ -29,6 +29,7 @@ export default async function ServiciosPage() {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "1.25rem" }}>
           {services.map((s) => {
             const d = daysUntil(s.next_renewal_date);
+            const spend = spendByService[s.id] ?? [];
             return (
               <Link key={s.id} href={`/servicios/${s.id}`} className="card" style={{ padding: "1.5rem", display: "grid", gap: "0.85rem", opacity: s.status === "cancelled" ? 0.6 : 1 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: "0.5rem" }}>
@@ -36,9 +37,21 @@ export default async function ServiciosPage() {
                   <ServiceStatusBadge status={s.status} />
                 </div>
                 {s.category && <div><CategoryTag name={s.category.name} color={s.category.color} /></div>}
-                <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.85rem" }}>
-                  <span style={{ color: "var(--text-muted)" }}>{BILLING_CYCLE_LABELS[s.billing_cycle]}</span>
-                  <span style={{ fontWeight: 600 }}>{formatMoney(s.expected_amount, s.currency)}</span>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: "0.85rem", gap: "0.5rem" }}>
+                  <span style={{ color: "var(--text-muted)" }}>Gastado</span>
+                  {spend.length > 0 ? (
+                    <span style={{ fontWeight: 600, textAlign: "right" }}>
+                      {spend.map((t) => formatMoney(t.total, t.currency)).join(" + ")}
+                    </span>
+                  ) : (
+                    <span style={{ color: "var(--text-faint)" }}>Sin pagos aún</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", fontSize: "0.78rem", color: "var(--text-faint)" }}>
+                  <span>{BILLING_CYCLE_LABELS[s.billing_cycle]}</span>
+                  {s.expected_amount != null && (
+                    <span>Estimado: {formatMoney(s.expected_amount, s.currency)}</span>
+                  )}
                 </div>
                 <div>
                   <span

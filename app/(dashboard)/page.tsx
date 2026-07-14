@@ -78,7 +78,8 @@ export default async function DashboardPage() {
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
                     <span style={{ fontWeight: 700, fontSize: "1rem" }}>
-                      {formatMoney(s.expected_amount, s.currency)}
+                      {formatMoney(s.expected_amount, s.currency)}{" "}
+                      <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
                     </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
                       {formatDate(s.next_renewal_date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
@@ -122,7 +123,10 @@ export default async function DashboardPage() {
                     {s.category && <CategoryTag name={s.category.name} color={s.category.color} />}
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                    <span style={{ fontWeight: 600 }}>{formatMoney(s.expected_amount, s.currency)}</span>
+                    <span style={{ fontWeight: 600 }}>
+                      {formatMoney(s.expected_amount, s.currency)}{" "}
+                      <span style={{ fontWeight: 400, fontSize: "0.72rem", color: "var(--text-faint)" }}>estimado</span>
+                    </span>
                     <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
                       {formatDate(s.next_renewal_date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
                     </span>
