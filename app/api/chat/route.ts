@@ -1,10 +1,12 @@
-// Asistente virtual: responde preguntas sobre los datos de gestorDIA
-// (pagos, servicios, rendiciones) usando un LLM vía OpenRouter.
-// El contexto se arma en cada request con un snapshot de la base.
+// Asistente virtual: responde preguntas sobre los datos de gestorDIA y
+// propone acciones (crear pago/servicio, marcar rendidos) vía tool calling.
+// Las acciones NO se ejecutan acá: se devuelve una propuesta que el chat
+// muestra como tarjeta de confirmación; /api/chat/execute las ejecuta.
 
 import { getCurrentUser, listPayments, listServices, listCategories } from "@/lib/data";
-import { toARS } from "@/lib/utils";
+import { toARS, daysUntil } from "@/lib/utils";
 import { BILLING_CYCLE_LABELS, RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS, SERVICE_STATUS_LABELS } from "@/lib/types";
+import { TOOL_DEFS, buildProposal } from "@/lib/assistant-tools";
 
 export const maxDuration = 60;
 
@@ -30,7 +32,15 @@ PROBLEMAS COMUNES:
 - "No encuentro un pago en rendición": verificar que el mes elegido sea el correcto (usa la fecha de pago) y que no esté ya abajo en la lista de Rendidos.
 - "Quiero deshacer una rendición": en /rendicion, sección Rendidos, botón "↩ Deshacer" en la fila.
 - "Un servicio aparece vencido": editar el servicio y actualizar la fecha de próxima renovación después de pagarlo (registrar el pago no la actualiza sola).
-- El asistente NO puede crear, editar ni borrar nada todavía: solo lee los datos. Para operar hay que usar las pantallas.
+`;
+
+const TOOLS_GUIDE = `
+ACCIONES QUE PODÉS EJECUTAR (herramientas):
+- crear_pago: registrar un gasto/pago nuevo.
+- crear_servicio: dar de alta un servicio/suscripción.
+- marcar_rendido: marcar pagos como rendidos al contador (usá los "id" de los pagos que figuran en los DATOS). Después el usuario puede descargar el PDF de esa rendición desde el chat.
+Cuando el usuario pida una de estas cosas, llamá a la herramienta directamente con los datos que dio: la app le muestra una tarjeta de confirmación con todo lo interpretado ANTES de ejecutar, así que no pidas confirmación por texto. Solo preguntá si falta un dato obligatorio (ej: el monto) o si no queda claro a qué pago se refiere.
+Lo que todavía NO podés hacer: editar o borrar pagos/servicios, adjuntar archivos, deshacer rendiciones. Para eso indicá cómo hacerlo en las pantallas.
 `;
 
 const PAGE_LABELS: [RegExp, string][] = [
@@ -53,6 +63,7 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
   ]);
 
   const pagos = payments.slice(0, MAX_PAYMENTS).map((p) => ({
+    id: p.id,
     fecha: p.payment_date,
     descripcion: p.description ?? null,
     servicio: p.service?.name ?? null,
@@ -83,20 +94,39 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
   const hoy = new Date().toISOString().slice(0, 10);
   const pageLabel = path ? PAGE_LABELS.find(([re]) => re.test(path))?.[1] ?? null : null;
 
+  // Alertas activas: renovaciones vencidas o en los próximos 7 días
+  const alertas = services
+    .filter((s) => s.status === "active" && s.next_renewal_date)
+    .map((s) => ({ s, d: daysUntil(s.next_renewal_date)! }))
+    .filter(({ d }) => d <= 7)
+    .sort((a, b) => a.d - b.d)
+    .map(({ s, d }) => ({
+      servicio: s.name,
+      fecha: s.next_renewal_date,
+      situacion: d < 0 ? `vencido hace ${-d} días` : d === 0 ? "vence hoy" : `vence en ${d} días`,
+      monto_estimado: s.expected_amount,
+      moneda: s.currency,
+      modo: s.payment_mode === "manual" ? "manual (hay que pagarlo)" : "débito automático",
+    }));
+
   return [
     "Sos el asistente virtual de gestorDIA, la app de gestión de pagos, suscripciones y rendición de cuentas de la Dirección de Inteligencia Artificial de la Municipalidad de San Miguel de Tucumán.",
     `Hoy es ${hoy}.`,
     "Respondé siempre en español argentino, breve y concreto. Texto plano: sin markdown, sin asteriscos, sin tablas. Podés usar guiones para enumerar.",
-    "Tenés dos funciones: (1) responder preguntas sobre los DATOS cargados, y (2) ayudar a usar la app con la GUÍA. Si la respuesta no surge de los datos o la guía, decilo claramente en lugar de inventar.",
+    "Tenés tres funciones: (1) responder preguntas sobre los DATOS cargados, (2) ayudar a usar la app con la GUÍA, y (3) ejecutar ACCIONES con las herramientas. Si la respuesta no surge de los datos o la guía, decilo claramente en lugar de inventar.",
     "Cuando des montos aclarás siempre la moneda. Si te piden totales, calculalos con cuidado sumando los pagos que correspondan.",
     'Sobre rendición: "rendido_el" con fecha significa que ese pago ya se presentó al contador; null significa pendiente de rendir.',
     "Los pagos con cotización null no tienen equivalente en ARS (conviene sugerir cargarla si preguntan por totales en pesos).",
     APP_GUIDE,
+    TOOLS_GUIDE,
     pageLabel
       ? `PÁGINA ACTUAL: el usuario está ahora mismo en "${pageLabel}" (${path}). Si pide ayuda sin dar contexto, asumí que es sobre esta pantalla.`
       : "",
     "",
     `DATOS (JSON):`,
+    alertas.length > 0
+      ? `ALERTAS ACTIVAS (renovaciones vencidas o en ≤7 días — priorizá esto si preguntan qué hay pendiente o por vencer): ${JSON.stringify(alertas)}`
+      : "ALERTAS ACTIVAS: ninguna por ahora.",
     `Categorías: ${JSON.stringify(categories.map((c) => c.name))}`,
     `Servicios: ${JSON.stringify(servicios)}`,
     `Pagos (${pagos.length} más recientes): ${JSON.stringify(pagos)}`,
@@ -146,57 +176,41 @@ export async function POST(req: Request) {
     },
     body: JSON.stringify({
       model: process.env.OPENROUTER_MODEL || DEFAULT_MODEL,
-      stream: true,
       max_tokens: 1024,
+      tools: TOOL_DEFS,
       messages: [{ role: "system", content: system }, ...messages],
     }),
   });
 
-  if (!upstream.ok || !upstream.body) {
+  if (!upstream.ok) {
     const detail = await upstream.text().catch(() => "");
     console.error("OpenRouter error:", upstream.status, detail);
     return Response.json(
-      { error: `El modelo no respondió (HTTP ${upstream.status}). Revisá la API key y el modelo configurado.` },
+      { error: `El modelo no respondió (HTTP ${upstream.status}). Revisá la API key y que el modelo soporte herramientas.` },
       { status: 502 }
     );
   }
 
-  // Convierte el SSE de OpenRouter en un stream de texto plano para el cliente
-  const reader = upstream.body.getReader();
-  const decoder = new TextDecoder();
-  const encoder = new TextEncoder();
-  let buffer = "";
+  const data = await upstream.json();
+  const msg = data.choices?.[0]?.message;
+  if (!msg) {
+    return Response.json({ error: "Respuesta vacía del modelo." }, { status: 502 });
+  }
 
-  const stream = new ReadableStream({
-    async pull(controller) {
-      const { done, value } = await reader.read();
-      if (done) {
-        controller.close();
-        return;
-      }
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const data = line.trim();
-        if (!data.startsWith("data:")) continue;
-        const payload = data.slice(5).trim();
-        if (payload === "[DONE]") continue;
-        try {
-          const json = JSON.parse(payload);
-          const delta: string | undefined = json.choices?.[0]?.delta?.content;
-          if (delta) controller.enqueue(encoder.encode(delta));
-        } catch {
-          // línea SSE incompleta o de metadata: se ignora
-        }
-      }
-    },
-    cancel() {
-      reader.cancel();
-    },
-  });
+  const toolCall = msg.tool_calls?.[0];
+  if (toolCall?.function?.name) {
+    let args: Record<string, unknown> = {};
+    try {
+      args = JSON.parse(toolCall.function.arguments || "{}");
+    } catch {
+      return Response.json({ type: "text", text: "No pude interpretar los datos de la acción. ¿Me los repetís?" });
+    }
+    const proposal = await buildProposal(toolCall.function.name, args);
+    if ("error" in proposal) {
+      return Response.json({ type: "text", text: proposal.error + " ¿Me pasás el dato que falta?" });
+    }
+    return Response.json({ type: "action", text: typeof msg.content === "string" && msg.content.trim() ? msg.content : null, action: proposal });
+  }
 
-  return new Response(stream, {
-    headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
-  });
+  return Response.json({ type: "text", text: typeof msg.content === "string" ? msg.content : "" });
 }

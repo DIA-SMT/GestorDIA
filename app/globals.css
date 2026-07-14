@@ -318,6 +318,25 @@ a.card:hover {
   0% { transform: scale(0.88); opacity: 0.8; }
   70%, 100% { transform: scale(1.28); opacity: 0; }
 }
+/* badge de alertas del asistente */
+.assistant-fab-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #fbbf24;
+  color: #201a02;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--bg);
+  box-shadow: 0 2px 10px rgba(251, 191, 36, 0.45);
+}
 @media (prefers-reduced-motion: reduce) {
   .assistant-fab::before { animation: none; }
 }

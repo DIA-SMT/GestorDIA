@@ -1,28 +1,78 @@
 "use client";
 
-// Asistente virtual flotante: botón abajo a la derecha que abre un chat.
-// Pregunta sobre gastos, servicios y rendiciones; responde /api/chat
-// con streaming de texto plano.
+// Asistente virtual flotante. Además de responder preguntas, propone
+// acciones (crear pago/servicio, marcar rendidos): el modelo llama una
+// herramienta, acá se muestra una tarjeta de confirmación y recién al
+// confirmar se ejecuta contra /api/chat/execute.
 
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
-import { usePathname } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
+import { formatDate, formatMoney } from "@/lib/utils";
+import type { CurrencyCode } from "@/lib/types";
+import { downloadRendicionPdf, type RendicionPdfRow } from "@/lib/rendicion-pdf";
 
-interface Msg {
-  role: "user" | "assistant";
-  content: string;
+interface ActionPdf {
+  rows: RendicionPdfRow[];
+  totalARS: number;
+  totalUSD: number;
+  filename: string;
+  title: string;
+}
+
+type ChatItem =
+  | { kind: "msg"; role: "user" | "assistant"; content: string }
+  | {
+      kind: "action";
+      tool: string;
+      title: string;
+      fields: { label: string; value: string }[];
+      warnings: string[];
+      args: Record<string, unknown>;
+      status: "pending" | "working" | "done" | "cancelled" | "error";
+      resultMessage?: string;
+      href?: string;
+      pdf?: ActionPdf;
+    };
+
+export interface AssistantAlert {
+  id: string;
+  name: string;
+  date: string;
+  days: number; // negativo = vencido
+  amount: number | null;
+  currency: CurrencyCode;
+  auto: boolean; // true = débito automático, false = pago manual
 }
 
 const SUGERENCIAS = [
   "¿Cuánto gastamos este mes?",
   "¿Qué falta rendir?",
-  "¿Qué servicios renuevan pronto?",
+  "Quiero registrar un gasto",
 ];
 
-export default function Assistant() {
+// Convierte el historial visible en mensajes para el LLM
+function toLlmMessages(items: ChatItem[]) {
+  return items.map((it) => {
+    if (it.kind === "msg") return { role: it.role, content: it.content };
+    const estado =
+      it.status === "done"
+        ? `ejecutada con éxito: ${it.resultMessage ?? ""}`
+        : it.status === "error"
+        ? `falló: ${it.resultMessage ?? ""}`
+        : it.status === "cancelled"
+        ? "cancelada por el usuario"
+        : "quedó sin confirmar";
+    return { role: "assistant" as const, content: `[Acción ${it.tool} (${it.title}) ${estado}]` };
+  });
+}
+
+export default function Assistant({ alerts = [] }: { alerts?: AssistantAlert[] }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [open, setOpen] = useState(false);
-  const [messages, setMessages] = useState<Msg[]>([]);
+  const [items, setItems] = useState<ChatItem[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,46 +80,91 @@ export default function Assistant() {
 
   useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [messages, open]);
+  }, [items, open, busy]);
 
   async function send(text: string) {
     const question = text.trim();
     if (!question || busy) return;
     setError(null);
     setInput("");
-    const history: Msg[] = [...messages, { role: "user", content: question }];
-    setMessages([...history, { role: "assistant", content: "" }]);
+    const history: ChatItem[] = [...items, { kind: "msg", role: "user", content: question }];
+    setItems(history);
     setBusy(true);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history, path: pathname }),
+        body: JSON.stringify({ messages: toLlmMessages(history), path: pathname }),
       });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error ?? `Error HTTP ${res.status}`);
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        throw new Error(data?.error ?? `Error HTTP ${res.status}`);
+      const next = [...history];
+      if (data.type === "action") {
+        if (data.text) next.push({ kind: "msg", role: "assistant", content: data.text });
+        next.push({
+          kind: "action",
+          tool: data.action.tool,
+          title: data.action.title,
+          fields: data.action.fields,
+          warnings: data.action.warnings ?? [],
+          args: data.action.args,
+          status: "pending",
+        });
+      } else {
+        next.push({ kind: "msg", role: "assistant", content: data.text || "…" });
       }
-
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let acc = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        acc += decoder.decode(value, { stream: true });
-        const current = acc;
-        setMessages([...history, { role: "assistant", content: current }]);
-      }
-      if (!acc.trim()) throw new Error("El modelo devolvió una respuesta vacía.");
+      setItems(next);
     } catch (e) {
-      setMessages(history); // saca la burbuja vacía del asistente
+      setItems(history);
       setError(e instanceof Error ? e.message : "No se pudo consultar al asistente.");
     } finally {
       setBusy(false);
     }
+  }
+
+  async function runAction(index: number) {
+    const item = items[index];
+    if (item.kind !== "action" || item.status !== "pending") return;
+    setItems((prev) => prev.map((it, i) => (i === index ? { ...it, status: "working" as const } : it)));
+    try {
+      const res = await fetch("/api/chat/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: item.tool, args: item.args }),
+      });
+      const data = await res.json().catch(() => null);
+      const ok = res.ok && data?.ok;
+      setItems((prev) =>
+        prev.map((it, i) =>
+          i === index && it.kind === "action"
+            ? {
+                ...it,
+                status: ok ? ("done" as const) : ("error" as const),
+                resultMessage: data?.message ?? data?.error ?? "Error desconocido.",
+                href: data?.href,
+                pdf: data?.pdf ?? undefined,
+              }
+            : it
+        )
+      );
+      if (ok) router.refresh(); // refresca la página de fondo con el dato nuevo
+    } catch {
+      setItems((prev) =>
+        prev.map((it, i) =>
+          i === index && it.kind === "action"
+            ? { ...it, status: "error" as const, resultMessage: "No se pudo ejecutar la acción." }
+            : it
+        )
+      );
+    }
+  }
+
+  function cancelAction(index: number) {
+    setItems((prev) =>
+      prev.map((it, i) => (i === index && it.kind === "action" ? { ...it, status: "cancelled" as const } : it))
+    );
   }
 
   return (
@@ -86,6 +181,11 @@ export default function Assistant() {
           <span style={{ color: "var(--text)", fontSize: "1.25rem", lineHeight: 1 }}>✕</span>
         ) : (
           <Image src="/brand/bot.png" alt="" width={36} height={25} />
+        )}
+        {!open && alerts.length > 0 && (
+          <span className="assistant-fab-badge" aria-label={`${alerts.length} alertas`}>
+            {alerts.length}
+          </span>
         )}
       </button>
 
@@ -109,16 +209,49 @@ export default function Assistant() {
             <Image src="/brand/bot.png" alt="" width={30} height={21} />
             <div>
               <div className="font-display" style={{ fontWeight: 600, fontSize: "0.95rem" }}>Asistente DIA</div>
-              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>Preguntale sobre gastos, servicios y rendiciones</div>
+              <div style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>Consultá o pedime cargar gastos, servicios y rendiciones</div>
             </div>
           </div>
 
           {/* Mensajes */}
           <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: "1rem 1.1rem", display: "flex", flexDirection: "column", gap: "0.65rem" }}>
-            {messages.length === 0 && (
+            {items.length === 0 && (
               <div style={{ display: "grid", gap: "0.5rem", marginTop: "0.5rem" }}>
+                {alerts.length > 0 && (
+                  <div
+                    style={{
+                      padding: "0.7rem 0.85rem",
+                      borderRadius: "14px 14px 14px 4px",
+                      background: "rgba(251, 191, 36, 0.07)",
+                      border: "1px solid rgba(251, 191, 36, 0.25)",
+                      display: "grid",
+                      gap: "0.45rem",
+                      marginBottom: "0.4rem",
+                    }}
+                  >
+                    <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "#fbbf24" }}>
+                      🔔 {alerts.length === 1 ? "1 alerta de pago" : `${alerts.length} alertas de pagos`}
+                    </span>
+                    {alerts.map((a) => (
+                      <Link
+                        key={a.id}
+                        href={`/servicios/${a.id}`}
+                        style={{ fontSize: "0.82rem", lineHeight: 1.4, color: "var(--text)" }}
+                      >
+                        <span style={{ fontWeight: 600 }}>{a.name}</span>
+                        {a.auto ? " se debita" : " tenés que pagarlo"} el {formatDate(a.date)}{" "}
+                        <span style={{ color: a.days <= 0 ? "#f87171" : "#fbbf24", fontWeight: 600 }}>
+                          {a.days < 0 ? `(venció hace ${-a.days}d)` : a.days === 0 ? "(¡hoy!)" : `(en ${a.days}d)`}
+                        </span>
+                        {a.amount != null && (
+                          <span style={{ color: "var(--text-muted)" }}> · {formatMoney(a.amount, a.currency)} estimado</span>
+                        )}
+                      </Link>
+                    ))}
+                  </div>
+                )}
                 <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", margin: 0 }}>
-                  Hola 👋 Puedo responder con los datos cargados en gestorDIA. Probá con:
+                  Hola 👋 Puedo responder con los datos de gestorDIA y también cargar gastos, crear servicios o rendir pagos por vos. Probá con:
                 </p>
                 {SUGERENCIAS.map((s) => (
                   <button
@@ -133,29 +266,46 @@ export default function Assistant() {
                 ))}
               </div>
             )}
-            {messages.map((m, i) => (
+
+            {items.map((it, i) =>
+              it.kind === "msg" ? (
+                <div
+                  key={i}
+                  style={{
+                    alignSelf: it.role === "user" ? "flex-end" : "flex-start",
+                    maxWidth: "85%",
+                    padding: "0.55rem 0.8rem",
+                    borderRadius: it.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+                    background: it.role === "user" ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)",
+                    border: "1px solid var(--glass-border)",
+                    color: "var(--text)",
+                    fontSize: "0.86rem",
+                    lineHeight: 1.45,
+                    whiteSpace: "pre-wrap",
+                    wordBreak: "break-word",
+                  }}
+                >
+                  {it.content}
+                </div>
+              ) : (
+                <ActionCard key={i} item={it} onConfirm={() => runAction(i)} onCancel={() => cancelAction(i)} />
+              )
+            )}
+
+            {busy && (
               <div
-                key={i}
                 style={{
-                  alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                  maxWidth: "85%",
+                  alignSelf: "flex-start",
                   padding: "0.55rem 0.8rem",
-                  borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-                  background: m.role === "user" ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)",
+                  borderRadius: "14px 14px 14px 4px",
+                  background: "rgba(255,255,255,0.04)",
                   border: "1px solid var(--glass-border)",
-                  color: "var(--text)",
-                  fontSize: "0.86rem",
-                  lineHeight: 1.45,
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-word",
                 }}
               >
-                {m.content || <PensandoDots />}
+                <PensandoDots />
               </div>
-            ))}
-            {error && (
-              <p style={{ color: "#f87171", fontSize: "0.8rem", margin: 0 }}>{error}</p>
             )}
+            {error && <p style={{ color: "#f87171", fontSize: "0.8rem", margin: 0 }}>{error}</p>}
           </div>
 
           {/* Input */}
@@ -168,7 +318,7 @@ export default function Assistant() {
           >
             <input
               className="input"
-              placeholder="Escribí tu pregunta…"
+              placeholder="Escribí tu pregunta o pedido…"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               disabled={busy}
@@ -181,6 +331,95 @@ export default function Assistant() {
         </div>
       )}
     </>
+  );
+}
+
+// Tarjeta de confirmación / resultado de una acción propuesta por el asistente
+function ActionCard({
+  item,
+  onConfirm,
+  onCancel,
+}: {
+  item: Extract<ChatItem, { kind: "action" }>;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const done = item.status === "done";
+  const cancelled = item.status === "cancelled";
+  const failed = item.status === "error";
+
+  return (
+    <div
+      style={{
+        alignSelf: "flex-start",
+        width: "95%",
+        padding: "0.8rem 0.9rem",
+        borderRadius: "14px 14px 14px 4px",
+        background: done ? "rgba(52, 211, 153, 0.06)" : "rgba(47, 169, 255, 0.06)",
+        border: `1px solid ${done ? "rgba(52, 211, 153, 0.3)" : failed ? "rgba(248, 113, 113, 0.4)" : "rgba(47, 169, 255, 0.3)"}`,
+        display: "grid",
+        gap: "0.55rem",
+        opacity: cancelled ? 0.55 : 1,
+        fontSize: "0.84rem",
+      }}
+    >
+      <span style={{ fontWeight: 600, color: done ? "#6ee7b7" : "var(--primary)" }}>
+        {done ? "✓ " : "⚡ "}
+        {item.title}
+      </span>
+
+      <div style={{ display: "grid", gap: "0.25rem" }}>
+        {item.fields.map((f, i) => (
+          <div key={i} style={{ display: "flex", gap: "0.6rem", justifyContent: "space-between" }}>
+            <span style={{ color: "var(--text-muted)", whiteSpace: "nowrap" }}>{f.label}</span>
+            <span style={{ textAlign: "right", fontWeight: 500 }}>{f.value}</span>
+          </div>
+        ))}
+      </div>
+
+      {item.warnings.length > 0 && !done && !cancelled && (
+        <div style={{ display: "grid", gap: "0.2rem" }}>
+          {item.warnings.map((w, i) => (
+            <span key={i} style={{ fontSize: "0.76rem", color: "#fbbf24" }}>⚠ {w}</span>
+          ))}
+        </div>
+      )}
+
+      {item.status === "pending" && (
+        <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.15rem" }}>
+          <button type="button" className="btn btn-primary" style={{ padding: "0.4rem 0.9rem", fontSize: "0.8rem" }} onClick={onConfirm}>
+            Confirmar
+          </button>
+          <button type="button" className="btn btn-ghost" style={{ padding: "0.4rem 0.9rem", fontSize: "0.8rem" }} onClick={onCancel}>
+            Cancelar
+          </button>
+        </div>
+      )}
+      {item.status === "working" && <PensandoDots />}
+      {cancelled && <span style={{ fontSize: "0.78rem", color: "var(--text-faint)" }}>Cancelado.</span>}
+      {(done || failed) && (
+        <div style={{ display: "grid", gap: "0.4rem" }}>
+          <span style={{ fontSize: "0.8rem", color: failed ? "#f87171" : "var(--text-muted)" }}>{item.resultMessage}</span>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            {done && item.href && (
+              <Link href={item.href} className="btn btn-ghost" style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}>
+                Ver →
+              </Link>
+            )}
+            {done && item.pdf && (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
+                onClick={() => downloadRendicionPdf(item.pdf!)}
+              >
+                ⬇ Descargar PDF
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

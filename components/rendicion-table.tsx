@@ -10,6 +10,7 @@ import { RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS } from "@/lib/types";
 import { formatMoney, formatDate, toARS } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import { marcarRendidos } from "@/app/(dashboard)/rendicion/actions";
+import { downloadRendicionPdf } from "@/lib/rendicion-pdf";
 
 type Row = Payment & { receipts?: { id: string }[] };
 
@@ -117,54 +118,24 @@ export default function RendicionTable({
 
   async function downloadPdf() {
     if (target.length === 0) return;
-    const { jsPDF } = await import("jspdf");
-    const autoTable = (await import("jspdf-autotable")).default;
-
-    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-    doc.setFontSize(15);
-    doc.setTextColor(20);
-    doc.text(`Rendición de cuentas — ${mesLabel}`, 40, 42);
-    doc.setFontSize(9);
-    doc.setTextColor(110);
-    doc.text(
-      `Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán — ${target.length} pagos`,
-      40,
-      58
-    );
-
-    autoTable(doc, {
-      startY: 74,
-      head: [["Fecha", "Proveedor", "CUIT", "Descripción", "Comprobante", "N°", "Moneda", "Monto", "En ARS", "Recibo"]],
-      body: target.map((p) => [
-        formatDate(p.payment_date),
-        p.provider ?? "—",
-        p.provider_tax_id ?? "",
-        p.description ?? p.service?.name ?? "—",
-        RECEIPT_TYPE_LABELS[p.receipt_type],
-        p.receipt_number ?? "",
-        p.currency,
-        Number(p.amount).toFixed(2),
-        (() => {
-          const ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
-          return ars == null ? "—" : Math.round(ars).toLocaleString("es-AR");
-        })(),
-        (p.receipts?.length ?? 0) > 0 ? "Sí" : "No",
-      ]),
-      styles: { fontSize: 8, cellPadding: 4 },
-      headStyles: { fillColor: [10, 102, 242], fontSize: 8 },
-      alternateRowStyles: { fillColor: [244, 248, 255] },
-      columnStyles: { 7: { halign: "right" }, 8: { halign: "right" }, 9: { halign: "center" } },
+    await downloadRendicionPdf({
+      title: `Rendición de cuentas — ${mesLabel}`,
+      rows: target.map((p) => ({
+        fecha: formatDate(p.payment_date),
+        proveedor: p.provider ?? "",
+        cuit: p.provider_tax_id ?? "",
+        descripcion: p.description ?? p.service?.name ?? "",
+        comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
+        nro: p.receipt_number ?? "",
+        moneda: p.currency,
+        monto: Number(p.amount),
+        ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
+        recibo: (p.receipts?.length ?? 0) > 0,
+      })),
+      totalARS: totalARS(target),
+      totalUSD: totalUSD(target),
+      filename: `rendicion-${mes}.pdf`,
     });
-
-    const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY;
-    doc.setFontSize(10);
-    doc.setTextColor(20);
-    doc.text(
-      `Total equivalente en ARS: ${formatMoney(totalARS(target), "ARS")}   ·   Total USD: ${formatMoney(totalUSD(target), "USD")}`,
-      40,
-      finalY + 22
-    );
-    doc.save(`rendicion-${mes}.pdf`);
   }
 
   function triggerDownload(blob: Blob, filename: string) {

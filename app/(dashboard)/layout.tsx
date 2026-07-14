@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import Image from "next/image";
-import { getCurrentUser, IS_DEMO } from "@/lib/data";
+import { getCurrentUser, listServices, IS_DEMO } from "@/lib/data";
+import { daysUntil } from "@/lib/utils";
 import Nav from "./nav";
 import Assistant from "@/components/assistant";
 
@@ -11,6 +12,23 @@ export default async function DashboardLayout({
 }) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
+
+  // Alertas para el asistente: renovaciones en los próximos 7 días o vencidas
+  const services = await listServices();
+  const alerts = services
+    .filter((s) => s.status === "active" && s.next_renewal_date)
+    .map((s) => ({ s, d: daysUntil(s.next_renewal_date)! }))
+    .filter(({ d }) => d <= 7)
+    .sort((a, b) => a.d - b.d)
+    .map(({ s, d }) => ({
+      id: s.id,
+      name: s.name,
+      date: s.next_renewal_date!,
+      days: d,
+      amount: s.expected_amount,
+      currency: s.currency,
+      auto: s.payment_mode !== "manual",
+    }));
 
   return (
     <div style={{ minHeight: "100vh" }}>
@@ -49,7 +67,7 @@ export default async function DashboardLayout({
         <Image src="/brand/muni.png" alt="" aria-hidden width={16} height={17} />
         Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán
       </footer>
-      <Assistant />
+      <Assistant alerts={alerts} />
     </div>
   );
 }
