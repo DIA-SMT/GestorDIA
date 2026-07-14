@@ -81,6 +81,7 @@ export interface Payment {
   receipt_number: string | null;    // número de comprobante / factura
   paid_by: string | null;
   notes: string | null;
+  rendido_at?: string | null; // cuándo se rindió al contador (null = pendiente)
   created_at: string;
   updated_at: string;
   service?: Service | null;

@@ -430,6 +430,21 @@ export async function updatePayment(
   return {};
 }
 
+// Marca (o desmarca) pagos como rendidos al contador
+export async function setPaymentsRendido(ids: string[], rendido: boolean): Promise<{ error?: string }> {
+  if (ids.length === 0) return {};
+  const rendido_at = rendido ? nowIso() : null;
+  if (IS_DEMO) {
+    demoDb().payments.forEach((p) => {
+      if (ids.includes(p.id)) p.rendido_at = rendido_at;
+    });
+    return {};
+  }
+  const supabase = await sb();
+  const { error } = await supabase.from("payments").update({ rendido_at }).in("id", ids);
+  return { error: error?.message };
+}
+
 export async function deletePayment(id: string): Promise<void> {
   if (IS_DEMO) {
     const db = demoDb();
