@@ -276,22 +276,26 @@ a.card:hover {
   width: 60px;
   height: 60px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-  background: linear-gradient(140deg, #0a66f2 0%, #2fa9ff 90%);
+  border: 1px solid var(--glass-border-strong);
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(18px) saturate(170%);
+  -webkit-backdrop-filter: blur(18px) saturate(170%);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   box-shadow:
-    0 6px 28px -6px rgba(10, 102, 242, 0.7),
-    inset 0 1px 0 rgba(255, 255, 255, 0.4);
-  transition: transform 0.18s ease, box-shadow 0.25s ease;
+    0 12px 32px -12px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transition: transform 0.18s ease, background 0.2s ease, border-color 0.2s ease, box-shadow 0.25s ease;
 }
 .assistant-fab:hover {
   transform: translateY(-3px) scale(1.05);
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.28);
   box-shadow:
-    0 14px 38px -8px rgba(47, 169, 255, 0.85),
-    inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    0 16px 40px -12px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.25);
 }
 .assistant-fab:active {
   transform: scale(0.96);
@@ -302,29 +306,16 @@ a.card:hover {
   position: absolute;
   inset: -5px;
   border-radius: 50%;
-  border: 2px solid rgba(47, 169, 255, 0.45);
-  animation: fabPulse 2.8s ease-out infinite;
+  border: 1.5px solid rgba(255, 255, 255, 0.25);
+  animation: fabPulse 3s ease-out infinite;
   pointer-events: none;
 }
 .assistant-fab.is-open::before {
   animation: none;
   opacity: 0;
 }
-/* sol amarillo de la marca */
-.assistant-fab::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  right: 3px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #f4d90a;
-  border: 2px solid var(--bg);
-  box-shadow: 0 0 10px rgba(244, 217, 10, 0.65);
-}
 @keyframes fabPulse {
-  0% { transform: scale(0.88); opacity: 0.9; }
+  0% { transform: scale(0.88); opacity: 0.8; }
   70%, 100% { transform: scale(1.28); opacity: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -334,6 +325,9 @@ a.card:hover {
 .assistant-panel {
   transform-origin: bottom right;
   animation: panelIn 0.22s cubic-bezier(0.2, 0.9, 0.3, 1);
+  background: rgba(10, 14, 26, 0.55) !important;
+  backdrop-filter: blur(28px) saturate(170%);
+  -webkit-backdrop-filter: blur(28px) saturate(170%);
 }
 @keyframes panelIn {
   from { opacity: 0; transform: translateY(12px) scale(0.96); }

@@ -83,9 +83,9 @@ export default function Assistant() {
         className={`assistant-fab${open ? " is-open" : ""}`}
       >
         {open ? (
-          <span style={{ color: "#fff", fontSize: "1.25rem", lineHeight: 1 }}>✕</span>
+          <span style={{ color: "var(--text)", fontSize: "1.25rem", lineHeight: 1 }}>✕</span>
         ) : (
-          <Image src="/brand/bot.png" alt="" width={36} height={25} style={{ filter: "brightness(4)" }} />
+          <Image src="/brand/bot.png" alt="" width={36} height={25} />
         )}
       </button>
 
@@ -102,8 +102,6 @@ export default function Assistant() {
             height: "min(540px, calc(100vh - 8rem))",
             display: "flex",
             flexDirection: "column",
-            background: "rgba(8, 11, 24, 0.92)",
-            backdropFilter: "blur(20px) saturate(150%)",
           }}
         >
           {/* Header */}
@@ -143,9 +141,9 @@ export default function Assistant() {
                   maxWidth: "85%",
                   padding: "0.55rem 0.8rem",
                   borderRadius: m.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-                  background: m.role === "user" ? "var(--grad-primary)" : "rgba(255,255,255,0.06)",
-                  border: m.role === "user" ? "none" : "1px solid var(--glass-border)",
-                  color: m.role === "user" ? "#fff" : "var(--text)",
+                  background: m.role === "user" ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.04)",
+                  border: "1px solid var(--glass-border)",
+                  color: "var(--text)",
                   fontSize: "0.86rem",
                   lineHeight: 1.45,
                   whiteSpace: "pre-wrap",
@@ -176,7 +174,7 @@ export default function Assistant() {
               disabled={busy}
               style={{ flex: 1 }}
             />
-            <button type="submit" className="btn btn-primary" disabled={busy || !input.trim()} style={{ padding: "0.6rem 0.9rem" }}>
+            <button type="submit" className="btn btn-ghost" disabled={busy || !input.trim()} style={{ padding: "0.6rem 0.9rem" }}>
               {busy ? "…" : "➤"}
             </button>
           </form>
