@@ -2,7 +2,8 @@ import Link from "next/link";
 import { monthPaidPayments, listServices, recentPayments as fetchRecent } from "@/lib/data";
 import { formatMoney, formatDate, daysUntil, toARS } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
-import { BILLING_CYCLE_LABELS } from "@/lib/types";
+import KpiCards, { type KpiDef } from "@/components/kpi-cards";
+import { BILLING_CYCLE_LABELS, type Payment, type Service } from "@/lib/types";
 
 export default async function DashboardPage() {
   const now = new Date();
@@ -45,13 +46,48 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      {/* KPIs */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1.25rem" }}>
-        <Kpi label="Gasto del mes (ARS)" value={formatMoney(monthTotalARS, "ARS")} hint={`${monthPayments.length} pagos este mes`} />
-        <Kpi label="Gasto del mes (USD)" value={formatMoney(monthTotalUSD, "USD")} hint="Solo pagos en dólares" />
-        <Kpi label="Para pagar vos" value={String(toPayManually.length)} hint="Pagos manuales en 30 días" accent={toPayManually.length > 0} />
-        <Kpi label="Se debitan solos" value={String(autoDebit.length)} hint="Débitos automáticos en 30 días" />
-      </div>
+      {/* KPIs con detalle expandible para verificar los números */}
+      <KpiCards
+        kpis={[
+          {
+            key: "ars",
+            label: "Gasto del mes (ARS)",
+            value: formatMoney(monthTotalARS, "ARS"),
+            hint: `${monthPayments.length} pagos este mes`,
+            note: "Suma de los pagos confirmados del mes, convertidos a ARS con la cotización cargada en cada pago. Los que no tienen cotización no entran en la suma.",
+            rows: monthPayments.map((p) => paymentRow(p)),
+          },
+          {
+            key: "usd",
+            label: "Gasto del mes (USD)",
+            value: formatMoney(monthTotalUSD, "USD"),
+            hint: "Solo pagos en dólares",
+            note: "Suma de los pagos confirmados del mes hechos en dólares, en su monto original.",
+            rows: monthPayments.filter((p) => p.currency === "USD").map((p) => ({
+              ...paymentRow(p),
+              amount: formatMoney(Number(p.amount), "USD"),
+              warn: false,
+            })),
+          },
+          {
+            key: "manual",
+            label: "Para pagar vos",
+            value: String(toPayManually.length),
+            hint: "Pagos manuales en 30 días",
+            accent: toPayManually.length > 0,
+            note: "Servicios activos de pago manual que renuevan en los próximos 30 días (o ya vencieron).",
+            rows: toPayManually.map((s) => serviceRow(s)),
+          },
+          {
+            key: "auto",
+            label: "Se debitan solos",
+            value: String(autoDebit.length),
+            hint: "Débitos automáticos en 30 días",
+            note: "Servicios activos con débito automático que renuevan en los próximos 30 días.",
+            rows: autoDebit.map((s) => serviceRow(s)),
+          },
+        ] satisfies KpiDef[]}
+      />
 
       {/* ⚠ Alertas: pagos manuales que tenés que hacer vos */}
       {toPayManually.length > 0 && (
@@ -186,14 +222,33 @@ const rowStyle: React.CSSProperties = {
   flexWrap: "wrap",
 };
 
-function Kpi({ label, value, hint, accent }: { label: string; value: string; hint?: string; accent?: boolean }) {
-  return (
-    <div className="card" style={{ padding: "1.5rem", borderColor: accent ? "#f59e0b55" : undefined }}>
-      <div style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{label}</div>
-      <div style={{ fontSize: "1.6rem", fontWeight: 700, marginTop: "0.3rem" }}>{value}</div>
-      {hint && <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>{hint}</div>}
-    </div>
-  );
+// Fila de detalle de un pago del mes: muestra la conversión a ARS usada en la suma
+function paymentRow(p: Payment) {
+  const ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
+  return {
+    id: p.id,
+    href: `/pagos/${p.id}`,
+    title: p.description || p.service?.name || p.provider || "Pago",
+    meta: `${formatDate(p.payment_date)} · ${formatMoney(Number(p.amount), p.currency)}${
+      p.currency !== "ARS" && p.exchange_rate ? ` × $${p.exchange_rate}` : ""
+    }`,
+    amount: ars == null ? "sin cotización" : formatMoney(ars, "ARS"),
+    warn: ars == null,
+  };
+}
+
+// Fila de detalle de un servicio con renovación próxima
+function serviceRow(s: Service) {
+  const d = daysUntil(s.next_renewal_date);
+  return {
+    id: s.id,
+    href: `/servicios/${s.id}`,
+    title: s.name,
+    meta: `${formatDate(s.next_renewal_date)} · ${BILLING_CYCLE_LABELS[s.billing_cycle]}${
+      d == null ? "" : d < 0 ? ` · venció hace ${-d}d` : d === 0 ? " · vence hoy" : ` · en ${d}d`
+    }`,
+    amount: s.expected_amount != null ? `${formatMoney(s.expected_amount, s.currency)} estimado` : "—",
+  };
 }
 
 function Empty({ children }: { children: React.ReactNode }) {

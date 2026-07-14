@@ -350,10 +350,10 @@ export async function monthPaidPayments(monthStart: string): Promise<Payment[]> 
   const supabase = await sb();
   const { data } = await supabase
     .from("payments")
-    .select("*, category:categories(*)")
+    .select("*, category:categories(*), service:services(name)")
     .gte("payment_date", monthStart)
     .eq("status", "paid");
-  return (data ?? []) as Payment[];
+  return (data ?? []) as unknown as Payment[];
 }
 
 // Pagos dentro de un rango de fechas [start, end) — para la rendición por período
