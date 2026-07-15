@@ -328,7 +328,7 @@ export async function listPayments(f: PaymentFilters = {}): Promise<Payment[]> {
   const supabase = await sb();
   let query = supabase
     .from("payments")
-    .select("*, category:categories(*), service:services(name), receipts(id)")
+    .select("*, category:categories(*), service:services(name), receipts(id, file_path, file_name, mime_type)")
     .order("payment_date", { ascending: false })
     .order("created_at", { ascending: false });
   if (f.category) query = query.eq("category_id", f.category);

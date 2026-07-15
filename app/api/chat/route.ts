@@ -39,8 +39,10 @@ ACCIONES QUE PODÉS EJECUTAR (herramientas):
 - crear_pago: registrar un gasto/pago suelto nuevo.
 - crear_servicio: dar de alta un servicio/suscripción.
 - pagar_servicio: cuando el usuario diga que YA PAGÓ un servicio existente (o toque "Ya lo pagué"), registra el pago de ese servicio y adelanta su próxima fecha de cobro un ciclo. Pasá el nombre del servicio; el monto por defecto es el estimado, salvo que el usuario aclare otro.
-- marcar_rendido: marcar pagos como rendidos al contador (usá los "id" de los pagos que figuran en los DATOS). Después el usuario puede descargar el PDF de esa rendición desde el chat.
-Cuando el usuario pida una de estas cosas, llamá a la herramienta directamente con los datos que dio: la app le muestra una tarjeta de confirmación con todo lo interpretado ANTES de ejecutar, así que no pidas confirmación por texto. Solo preguntá si falta un dato obligatorio (ej: el monto) o si no queda claro a qué pago se refiere.
+- generar_rendicion: cuando el usuario pida "hacé/generá/dame la rendición" o "el PDF de la rendición" de un mes o de un proveedor/nombre, SIN hablar de marcar. Pasá "mes" (formato YYYY-MM; convertí "julio 2026" a "2026-07") y/o "texto" (nombre o proveedor). Genera el PDF (con los recibos adjuntos incrustados) para descargar; NO marca nada como rendido.
+- marcar_rendido: cuando el usuario diga "marcá como rendidos", "dá por rendidos" o "rendí" (confirmar la presentación al contador). Podés indicar los pagos por sus "id" (de los DATOS) o por "mes"/"texto" igual que generar_rendicion. Marca los pendientes y devuelve también el PDF para descargar.
+Distinguí bien: pedir/descargar el PDF => generar_rendicion; confirmar que se presentaron (marcarlos) => marcar_rendido. Si el usuario primero pide el PDF y después dice "ahora marcalos"/"dalos por rendidos", usá el mismo mes/texto.
+Cuando el usuario pida una de estas cosas, llamá a la herramienta directamente con los datos que dio: la app le muestra una tarjeta de confirmación con todo lo interpretado ANTES de ejecutar, así que no pidas confirmación por texto. Solo preguntá si falta un dato obligatorio (ej: el monto) o si no queda claro a qué pago o período se refiere.
 Lo que todavía NO podés hacer: editar o borrar pagos/servicios, adjuntar archivos, deshacer rendiciones. Para eso indicá cómo hacerlo en las pantallas.
 `;
 

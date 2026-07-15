@@ -3,16 +3,18 @@
 // tarjeta de confirmación con los datos resueltos) y recién cuando el
 // usuario confirma en el chat se ejecuta (executeAction).
 
-import type { BillingCycle, CurrencyCode, PaymentStatus, ReceiptType } from "./types";
+import type { BillingCycle, CurrencyCode, Payment, PaymentStatus, ReceiptType } from "./types";
 import { BILLING_CYCLE_LABELS, RECEIPT_TYPE_LABELS } from "./types";
 import {
   listCategories,
   listServicesSimple,
   listPayments,
+  listPaymentsBetween,
   createPayment,
   createService,
   setPaymentsRendido,
   setServiceRenewal,
+  getReceiptUrls,
   type PaymentInput,
   type ServiceInput,
 } from "./data";
@@ -103,15 +105,32 @@ export const TOOL_DEFS = [
   {
     type: "function",
     function: {
+      name: "generar_rendicion",
+      description:
+        "Genera el PDF de rendición de un período o filtro SIN marcar nada como rendido. Usala cuando el usuario pida 'hacé/generá/dame la rendición' o 'el PDF de la rendición' de un mes o de un proveedor/nombre. El PDF incluye los recibos/facturas adjuntos incrustados. Después el usuario puede descargarlo desde el chat y, si quiere, pedir marcarlos como rendidos.",
+      parameters: {
+        type: "object",
+        properties: {
+          mes: { type: "string", description: "Mes a rendir en formato YYYY-MM (ej: 2026-07)" },
+          texto: { type: "string", description: "Filtro por nombre/descripción/proveedor (ej: 'Claude', 'Vercel')" },
+          pago_ids: { type: "array", items: { type: "string" }, description: "Ids puntuales de los DATOS (opcional, alternativa a mes/texto)" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "marcar_rendido",
       description:
-        "Marca uno o más pagos como rendidos al contador. Usá los ids de los pagos que figuran en los DATOS. Después de ejecutarse, el usuario puede descargar el PDF de la rendición desde el chat.",
+        "Marca pagos como rendidos al contador. Indicá los pagos por sus ids (pago_ids, de los DATOS) o por filtro: mes (YYYY-MM) y/o texto (nombre/proveedor). Con filtro, marca solo los que todavía están pendientes. Devuelve también el PDF de esa rendición (con recibos incrustados) para descargar.",
       parameters: {
         type: "object",
         properties: {
           pago_ids: { type: "array", items: { type: "string" }, description: "Ids de los pagos a rendir" },
+          mes: { type: "string", description: "Mes a rendir en formato YYYY-MM (alternativa a pago_ids)" },
+          texto: { type: "string", description: "Filtro por nombre/descripción/proveedor (alternativa a pago_ids)" },
         },
-        required: ["pago_ids"],
       },
     },
   },
@@ -140,6 +159,90 @@ const RECEIPT_TYPES = Object.keys(RECEIPT_TYPE_LABELS) as ReceiptType[];
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
 const today = () => new Date().toISOString().slice(0, 10);
+
+// ---------- Rendición: resolución por mes/nombre y armado del PDF ----------
+const isMonth = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}$/.test(s);
+
+function monthRange(mes: string): { start: string; end: string } {
+  const [y, m] = mes.split("-").map(Number);
+  const end = m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, "0")}-01`;
+  return { start: `${mes}-01`, end };
+}
+
+function monthLabel(mes: string): string {
+  const [y, m] = mes.split("-").map(Number);
+  return new Intl.DateTimeFormat("es-AR", { month: "long", year: "numeric" }).format(new Date(y, m - 1, 1));
+}
+
+// Resuelve los pagos de una rendición por mes y/o texto y/o ids explícitos
+async function resolveRendicionPayments(raw: Record<string, unknown>): Promise<{
+  found: Payment[];
+  label: string;
+  mes: string | null;
+}> {
+  const ids = Array.isArray(raw.pago_ids) ? raw.pago_ids.filter((x): x is string => typeof x === "string") : [];
+  const mes = isMonth(raw.mes) ? raw.mes : null;
+  const texto = typeof raw.texto === "string" && raw.texto.trim() ? raw.texto.trim().toLowerCase() : null;
+
+  const base = mes
+    ? await listPaymentsBetween(monthRange(mes).start, monthRange(mes).end)
+    : await listPayments({});
+
+  let found = base;
+  if (ids.length) found = found.filter((p) => ids.includes(p.id));
+  if (texto) {
+    found = found.filter((p) =>
+      [p.description, p.provider, p.service?.name, p.receipt_number, p.category?.name].some((s) =>
+        s?.toLowerCase().includes(texto)
+      )
+    );
+  }
+  found = [...found].sort((a, b) => a.payment_date.localeCompare(b.payment_date));
+
+  const label = mes ? monthLabel(mes) : texto ? `"${String(raw.texto).trim()}"` : "todos los pagos";
+  return { found, label, mes };
+}
+
+// Arma el payload del PDF (con recibos incrustados vía URL firmada) para el chat
+async function buildRendicionPdf(
+  found: Payment[],
+  label: string,
+  mes: string | null
+): Promise<NonNullable<ActionResult["pdf"]>> {
+  const paths = found
+    .flatMap((p) => p.receipts ?? [])
+    .map((r) => r.file_path)
+    .filter((p): p is string => !!p);
+  const urls = paths.length ? await getReceiptUrls([...new Set(paths)]) : {};
+
+  const rows: RendicionPdfRow[] = found.map((p) => ({
+    fecha: formatDate(p.payment_date),
+    proveedor: p.provider ?? "",
+    cuit: p.provider_tax_id ?? "",
+    descripcion: p.description ?? p.service?.name ?? "",
+    comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
+    nro: p.receipt_number ?? "",
+    moneda: p.currency,
+    monto: Number(p.amount),
+    ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
+    recibo: (p.receipts?.length ?? 0) > 0,
+    receipts: (p.receipts ?? []).map((r) => ({
+      file_name: r.file_name,
+      mime_type: r.mime_type,
+      url: r.file_path ? urls[r.file_path] ?? null : null,
+    })),
+  }));
+  const totalARS = rows.reduce((a, r) => a + (r.ars ?? 0), 0);
+  const totalUSD = found.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
+
+  return {
+    rows,
+    totalARS,
+    totalUSD,
+    filename: `rendicion-${mes ?? today()}.pdf`,
+    title: `Rendición de cuentas — ${label}`,
+  };
+}
 
 async function resolveCategoria(
   nombre: unknown,
@@ -328,28 +431,83 @@ export async function buildProposal(
     };
   }
 
+  if (tool === "generar_rendicion") {
+    const hasFilter = isMonth(raw.mes) || (typeof raw.texto === "string" && raw.texto.trim()) ||
+      (Array.isArray(raw.pago_ids) && raw.pago_ids.length > 0);
+    if (!hasFilter) return { error: "¿De qué mes o de qué proveedor querés la rendición?" };
+
+    const { found, label, mes } = await resolveRendicionPayments(raw);
+    if (found.length === 0) return { error: `No encontré pagos para la rendición (${label}).` };
+
+    const MAX = 15;
+    const fields = found.slice(0, MAX).map((p) => ({
+      label: formatDate(p.payment_date),
+      value: `${p.description || p.service?.name || p.provider || "Pago"} — ${formatMoney(Number(p.amount), p.currency)}${
+        (p.receipts?.length ?? 0) > 0 ? " 📎" : ""
+      }`,
+    }));
+    if (found.length > MAX) fields.push({ label: "…", value: `y ${found.length - MAX} pago(s) más` });
+
+    const conRecibo = found.filter((p) => (p.receipts?.length ?? 0) > 0).length;
+    const totalARS = found.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
+    fields.push({ label: "Total ARS", value: formatMoney(totalARS, "ARS") });
+    fields.push({ label: "Con recibo adjunto", value: `${conRecibo} de ${found.length} (se incrustan en el PDF)` });
+
+    const yaRendidos = found.filter((p) => p.rendido_at).length;
+    if (yaRendidos > 0) warnings.push(`${yaRendidos} de estos pagos ya estaban rendidos (se incluyen igual en el PDF).`);
+
+    return {
+      tool,
+      title: `Generar rendición — ${label} (${found.length})`,
+      fields,
+      warnings,
+      args: { ids: found.map((p) => p.id), label, mes },
+    };
+  }
+
   if (tool === "marcar_rendido") {
-    const ids = Array.isArray(raw.pago_ids) ? raw.pago_ids.filter((x): x is string => typeof x === "string") : [];
-    if (ids.length === 0) return { error: "No se indicó ningún pago para rendir." };
+    const idsRaw = Array.isArray(raw.pago_ids) ? raw.pago_ids.filter((x): x is string => typeof x === "string") : [];
+    const hasFilter = isMonth(raw.mes) || (typeof raw.texto === "string" && !!raw.texto.trim());
 
-    const all = await listPayments({});
-    const found = all.filter((p) => ids.includes(p.id));
-    if (found.length === 0) return { error: "No encontré los pagos indicados." };
-    if (found.length < ids.length) warnings.push(`${ids.length - found.length} de los pagos indicados no existen y se ignoran.`);
-    const yaRendidos = found.filter((p) => p.rendido_at);
-    if (yaRendidos.length > 0) warnings.push(`${yaRendidos.length} ya estaban rendidos: se vuelven a marcar con la fecha de hoy.`);
+    let found: Payment[];
+    let label = "hoy";
+    let mes: string | null = null;
 
-    const fields = found.map((p) => ({
+    if (idsRaw.length > 0) {
+      // Camino por ids explícitos (de los DATOS)
+      const all = await listPayments({});
+      found = all.filter((p) => idsRaw.includes(p.id));
+      if (found.length === 0) return { error: "No encontré los pagos indicados." };
+      if (found.length < idsRaw.length) warnings.push(`${idsRaw.length - found.length} de los pagos indicados no existen y se ignoran.`);
+      const yaRendidos = found.filter((p) => p.rendido_at);
+      if (yaRendidos.length > 0) warnings.push(`${yaRendidos.length} ya estaban rendidos: se vuelven a marcar con la fecha de hoy.`);
+    } else if (hasFilter) {
+      // Camino por mes/nombre: solo los pendientes de rendir
+      const r = await resolveRendicionPayments(raw);
+      label = r.label;
+      mes = r.mes;
+      if (r.found.length === 0) return { error: `No encontré pagos (${r.label}) para rendir.` };
+      const pend = r.found.filter((p) => !p.rendido_at);
+      if (pend.length === 0) return { error: `Todos los pagos (${r.label}) ya están rendidos.` };
+      if (r.found.length > pend.length) warnings.push(`${r.found.length - pend.length} ya estaban rendidos: se omiten.`);
+      found = pend;
+    } else {
+      return { error: "¿Qué pagos marco como rendidos? Podés decirme el mes o el proveedor." };
+    }
+
+    const MAX = 15;
+    const fields = found.slice(0, MAX).map((p) => ({
       label: formatDate(p.payment_date),
       value: `${p.description || p.service?.name || p.provider || "Pago"} — ${formatMoney(Number(p.amount), p.currency)}`,
     }));
+    if (found.length > MAX) fields.push({ label: "…", value: `y ${found.length - MAX} pago(s) más` });
 
     return {
       tool,
       title: `Marcar como rendidos (${found.length} ${found.length === 1 ? "pago" : "pagos"})`,
       fields,
       warnings,
-      args: { ids: found.map((p) => p.id) },
+      args: { ids: found.map((p) => p.id), label, mes },
     };
   }
 
@@ -392,41 +550,43 @@ export async function executeAction(
     };
   }
 
+  if (tool === "generar_rendicion") {
+    const ids = (args.ids as string[]) ?? [];
+    const { found } = await resolveRendicionPayments({ pago_ids: ids });
+    if (found.length === 0) return { ok: false, message: "No encontré los pagos de la rendición." };
+
+    const label = typeof args.label === "string" ? args.label : formatDate(today());
+    const mes = typeof args.mes === "string" ? args.mes : null;
+    const pdf = await buildRendicionPdf(found, label, mes);
+    const conRecibo = found.filter((p) => (p.receipts?.length ?? 0) > 0).length;
+
+    return {
+      ok: true,
+      message: `Rendición lista: ${found.length} ${found.length === 1 ? "pago" : "pagos"}${
+        conRecibo > 0 ? `, ${conRecibo} con recibo incrustado` : ""
+      }. Descargá el PDF acá abajo.`,
+      href: "/rendicion",
+      pdf,
+    };
+  }
+
   if (tool === "marcar_rendido") {
     const ids = (args.ids as string[]) ?? [];
-    const all = await listPayments({});
-    const found = all.filter((p) => ids.includes(p.id));
+    const { found } = await resolveRendicionPayments({ pago_ids: ids });
     if (found.length === 0) return { ok: false, message: "No encontré los pagos a rendir." };
 
     const r = await setPaymentsRendido(found.map((p) => p.id), true);
     if (r.error) return { ok: false, message: r.error };
 
-    const rows: RendicionPdfRow[] = found.map((p) => ({
-      fecha: formatDate(p.payment_date),
-      proveedor: p.provider ?? "",
-      cuit: p.provider_tax_id ?? "",
-      descripcion: p.description ?? p.service?.name ?? "",
-      comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
-      nro: p.receipt_number ?? "",
-      moneda: p.currency,
-      monto: Number(p.amount),
-      ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
-      recibo: (p.receipts?.length ?? 0) > 0,
-    }));
-    const totalARS = rows.reduce((a, r2) => a + (r2.ars ?? 0), 0);
-    const totalUSD = found.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
+    const label = typeof args.label === "string" ? args.label : formatDate(today());
+    const mes = typeof args.mes === "string" ? args.mes : null;
+    const pdf = await buildRendicionPdf(found, label, mes);
 
     return {
       ok: true,
-      message: `${found.length} ${found.length === 1 ? "pago marcado" : "pagos marcados"} como rendidos.`,
+      message: `${found.length} ${found.length === 1 ? "pago marcado" : "pagos marcados"} como rendidos. El PDF quedó listo para descargar.`,
       href: "/rendicion",
-      pdf: {
-        rows,
-        totalARS,
-        totalUSD,
-        filename: `rendicion-${today()}.pdf`,
-        title: `Rendición de cuentas — ${formatDate(today())}`,
-      },
+      pdf,
     };
   }
 
