@@ -382,7 +382,7 @@ export async function listPaymentsBetween(startInclusive: string, endExclusive: 
   const supabase = await sb();
   const { data } = await supabase
     .from("payments")
-    .select("*, category:categories(*), service:services(name), receipts(id)")
+    .select("*, category:categories(*), service:services(name), receipts(id, file_path, file_name, mime_type)")
     .gte("payment_date", startInclusive)
     .lt("payment_date", endExclusive)
     .order("payment_date", { ascending: true });
@@ -529,9 +529,31 @@ export async function deleteReceipt(receiptId: string): Promise<void> {
   }
 }
 
-export async function getReceiptUrl(filePath: string): Promise<string | null> {
+export async function getReceiptUrl(filePath: string, expiresInSeconds = 60 * 10): Promise<string | null> {
   if (IS_DEMO) return null; // en demo no hay archivo real
   const supabase = await sb();
-  const { data } = await supabase.storage.from("receipts").createSignedUrl(filePath, 60 * 10);
+  const { data } = await supabase.storage.from("receipts").createSignedUrl(filePath, expiresInSeconds);
   return data?.signedUrl ?? null;
+}
+
+// URLs firmadas en lote (una sola llamada). Se usa en la exportación de la
+// rendición: enlace en el CSV y descarga de bytes para incrustar en el PDF.
+export async function getReceiptUrls(
+  filePaths: string[],
+  expiresInSeconds = 60 * 60 * 24 * 7 // 7 días
+): Promise<Record<string, string | null>> {
+  const map: Record<string, string | null> = {};
+  if (filePaths.length === 0) return map;
+  if (IS_DEMO) {
+    filePaths.forEach((p) => (map[p] = null)); // en demo no hay archivo real
+    return map;
+  }
+  const supabase = await sb();
+  const { data } = await supabase.storage.from("receipts").createSignedUrls(filePaths, expiresInSeconds);
+  (data ?? []).forEach((row) => {
+    if (row.path) map[row.path] = row.error ? null : row.signedUrl;
+  });
+  // Cualquier ruta sin respuesta queda como null
+  filePaths.forEach((p) => (p in map ? null : (map[p] = null)));
+  return map;
 }

@@ -9,10 +9,11 @@ import type { Category, Payment } from "@/lib/types";
 import { RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS } from "@/lib/types";
 import { formatMoney, formatDate, toARS } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
-import { marcarRendidos } from "@/app/(dashboard)/rendicion/actions";
+import { marcarRendidos, firmarRecibos } from "@/app/(dashboard)/rendicion/actions";
 import { downloadRendicionPdf } from "@/lib/rendicion-pdf";
 
-type Row = Payment & { receipts?: { id: string }[] };
+type ReceiptLite = { id: string; file_path?: string; file_name?: string; mime_type?: string | null };
+type Row = Payment & { receipts?: ReceiptLite[] };
 
 export default function RendicionTable({
   payments,
@@ -29,6 +30,7 @@ export default function RendicionTable({
   const [cat, setCat] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState<null | "csv" | "pdf">(null);
   const [isPending, startTransition] = useTransition();
 
   // Filtro: por texto (descripción, proveedor, servicio, nro comprobante)
@@ -82,60 +84,98 @@ export default function RendicionTable({
   }
 
   // ---------- Exportar ----------
-  const exportRows = (rows: Row[]) =>
-    rows.map((p) => ({
-      Fecha: p.payment_date,
-      Proveedor: p.provider ?? "",
-      CUIT: p.provider_tax_id ?? "",
-      Descripcion: p.description ?? p.service?.name ?? "",
-      Categoria: p.category?.name ?? "",
-      TipoComprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
-      NroComprobante: p.receipt_number ?? "",
-      MedioPago: p.payment_method ?? "",
-      Moneda: p.currency,
-      Monto: Number(p.amount),
-      Cotizacion: p.exchange_rate ?? "",
-      MontoARS: toARS(Number(p.amount), p.currency, p.exchange_rate) ?? "",
-      Estado: PAYMENT_STATUS_LABELS[p.status],
-      TieneRecibo: (p.receipts?.length ?? 0) > 0 ? "Si" : "No",
-    }));
+  // Firma en lote las URLs de todos los recibos de las filas dadas (una sola
+  // llamada al servidor). Devuelve un mapa file_path -> URL firmada (o null).
+  async function signAll(rows: Row[]): Promise<Record<string, string | null>> {
+    const paths = rows
+      .flatMap((p) => p.receipts ?? [])
+      .map((r) => r.file_path)
+      .filter((p): p is string => !!p);
+    if (paths.length === 0) return {};
+    try {
+      return await firmarRecibos([...new Set(paths)]);
+    } catch {
+      return {};
+    }
+  }
 
-  function downloadCsv() {
-    const rows = exportRows(target);
-    if (rows.length === 0) return;
-    const headers = Object.keys(rows[0]) as (keyof (typeof rows)[0])[];
-    const escape = (v: string | number | null) => {
-      const s = v == null ? "" : String(v);
-      return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-    const csv = [
-      headers.join(";"),
-      ...rows.map((r) => headers.map((h) => escape(r[h])).join(";")),
-    ].join("\r\n");
-    const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-    triggerDownload(blob, `rendicion-${mes}.csv`);
+  const exportRows = (rows: Row[], urls: Record<string, string | null>) =>
+    rows.map((p) => {
+      const recs = p.receipts ?? [];
+      const links = recs.map((r) => (r.file_path ? urls[r.file_path] : null)).filter(Boolean);
+      return {
+        Fecha: p.payment_date,
+        Proveedor: p.provider ?? "",
+        CUIT: p.provider_tax_id ?? "",
+        Descripcion: p.description ?? p.service?.name ?? "",
+        Categoria: p.category?.name ?? "",
+        TipoComprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
+        NroComprobante: p.receipt_number ?? "",
+        MedioPago: p.payment_method ?? "",
+        Moneda: p.currency,
+        Monto: Number(p.amount),
+        Cotizacion: p.exchange_rate ?? "",
+        MontoARS: toARS(Number(p.amount), p.currency, p.exchange_rate) ?? "",
+        Estado: PAYMENT_STATUS_LABELS[p.status],
+        TieneRecibo: recs.length > 0 ? "Si" : "No",
+        Recibos: recs.map((r) => r.file_name).filter(Boolean).join(" | "),
+        RecibosURL: links.join(" | "),
+      };
+    });
+
+  async function downloadCsv() {
+    if (target.length === 0) return;
+    setExporting("csv");
+    try {
+      const urls = await signAll(target);
+      const rows = exportRows(target, urls);
+      const headers = Object.keys(rows[0]) as (keyof (typeof rows)[0])[];
+      const escape = (v: string | number | null) => {
+        const s = v == null ? "" : String(v);
+        return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+      };
+      const csv = [
+        headers.join(";"),
+        ...rows.map((r) => headers.map((h) => escape(r[h])).join(";")),
+      ].join("\r\n");
+      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+      triggerDownload(blob, `rendicion-${mes}.csv`);
+    } finally {
+      setExporting(null);
+    }
   }
 
   async function downloadPdf() {
     if (target.length === 0) return;
-    await downloadRendicionPdf({
-      title: `Rendición de cuentas — ${mesLabel}`,
-      rows: target.map((p) => ({
-        fecha: formatDate(p.payment_date),
-        proveedor: p.provider ?? "",
-        cuit: p.provider_tax_id ?? "",
-        descripcion: p.description ?? p.service?.name ?? "",
-        comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
-        nro: p.receipt_number ?? "",
-        moneda: p.currency,
-        monto: Number(p.amount),
-        ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
-        recibo: (p.receipts?.length ?? 0) > 0,
-      })),
-      totalARS: totalARS(target),
-      totalUSD: totalUSD(target),
-      filename: `rendicion-${mes}.pdf`,
-    });
+    setExporting("pdf");
+    try {
+      const urls = await signAll(target);
+      await downloadRendicionPdf({
+        title: `Rendición de cuentas — ${mesLabel}`,
+        rows: target.map((p) => ({
+          fecha: formatDate(p.payment_date),
+          proveedor: p.provider ?? "",
+          cuit: p.provider_tax_id ?? "",
+          descripcion: p.description ?? p.service?.name ?? "",
+          comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
+          nro: p.receipt_number ?? "",
+          moneda: p.currency,
+          monto: Number(p.amount),
+          ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
+          recibo: (p.receipts?.length ?? 0) > 0,
+          receipts: (p.receipts ?? []).map((r) => ({
+            file_name: r.file_name ?? "recibo",
+            mime_type: r.mime_type ?? null,
+            url: r.file_path ? urls[r.file_path] ?? null : null,
+          })),
+        })),
+        totalARS: totalARS(target),
+        totalUSD: totalUSD(target),
+        filename: `rendicion-${mes}.pdf`,
+      });
+    } finally {
+      setExporting(null);
+    }
   }
 
   function triggerDownload(blob: Blob, filename: string) {
@@ -172,11 +212,11 @@ export default function RendicionTable({
           </select>
         </div>
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-          <button type="button" className="btn btn-ghost" onClick={downloadCsv} disabled={target.length === 0}>
-            ⬇ CSV ({exportLabel})
+          <button type="button" className="btn btn-ghost" onClick={downloadCsv} disabled={target.length === 0 || exporting !== null}>
+            {exporting === "csv" ? "Generando…" : `⬇ CSV (${exportLabel})`}
           </button>
-          <button type="button" className="btn btn-ghost" onClick={downloadPdf} disabled={target.length === 0}>
-            ⬇ PDF ({exportLabel})
+          <button type="button" className="btn btn-ghost" onClick={downloadPdf} disabled={target.length === 0 || exporting !== null}>
+            {exporting === "pdf" ? "Armando PDF con recibos…" : `⬇ PDF (${exportLabel})`}
           </button>
           <button
             type="button"
