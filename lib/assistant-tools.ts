@@ -11,6 +11,7 @@ import {
   listPayments,
   listPaymentsBetween,
   createPayment,
+  createCyclePayment,
   createService,
   setPaymentsRendido,
   setServiceRenewal,
@@ -18,7 +19,16 @@ import {
   type PaymentInput,
   type ServiceInput,
 } from "./data";
-import { formatMoney, formatDate, toARS, nextCycleDate, upcomingRenewal } from "./utils";
+import {
+  formatMoney,
+  formatDate,
+  toARS,
+  nextCycleDate,
+  anchorDayOf,
+  todayISO,
+  isRecurring,
+  periodLabel,
+} from "./utils";
 import type { RendicionPdfRow } from "./rendicion-pdf";
 
 // ---------- Definiciones para el LLM (formato OpenAI/OpenRouter) ----------
@@ -158,7 +168,8 @@ const CYCLES: BillingCycle[] = ["monthly", "yearly", "quarterly", "weekly", "one
 const RECEIPT_TYPES = Object.keys(RECEIPT_TYPE_LABELS) as ReceiptType[];
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
-const today = () => new Date().toISOString().slice(0, 10);
+// Día calendario argentino, no UTC (ver todayISO en lib/utils.ts)
+const today = () => todayISO();
 
 // ---------- Rendición: resolución por mes/nombre y armado del PDF ----------
 const isMonth = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}$/.test(s);
@@ -188,7 +199,9 @@ async function resolveRendicionPayments(raw: Record<string, unknown>): Promise<{
     ? await listPaymentsBetween(monthRange(mes).start, monthRange(mes).end)
     : await listPayments({});
 
-  let found = base;
+  // Al contador solo se le rinde lo efectivamente pagado: un pago pendiente,
+  // fallido o reembolsado no puede entrar en el PDF ni darse por presentado.
+  let found = base.filter((p) => p.status === "paid");
   if (ids.length) found = found.filter((p) => ids.includes(p.id));
   if (texto) {
     found = found.filter((p) =>
@@ -242,6 +255,26 @@ async function buildRendicionPdf(
     filename: `rendicion-${mes ?? today()}.pdf`,
     title: `Rendición de cuentas — ${label}`,
   };
+}
+
+// Si el período que se va a rendir tiene cargos recurrentes sin confirmar, el
+// PDF le sale incompleto al contador. Se avisa en la tarjeta de confirmación.
+async function avisoCargosSinConfirmar(mes: string | null): Promise<string[]> {
+  try {
+    const { loadPendingCharges } = await import("./pending");
+    const pending = await loadPendingCharges();
+    const cargos = pending.groups
+      .flatMap((g) => g.charges)
+      .filter((c) => (mes ? c.cycleDate.slice(0, 7) === mes : true));
+    if (cargos.length === 0) return [];
+    const nombres = [...new Set(cargos.map((c) => c.serviceName))].join(", ");
+    return [
+      `Quedan ${cargos.length} cargo(s) sin confirmar${mes ? " de ese mes" : ""} (${nombres}): ` +
+        "todavía no son un pago, así que no entran en este PDF. Confirmalos en el dashboard si corresponden.",
+    ];
+  } catch {
+    return [];
+  }
 }
 
 async function resolveCategoria(
@@ -384,16 +417,28 @@ export async function buildProposal(
     if (monto == null || monto <= 0) {
       return { error: `El servicio "${srv.name}" no tiene monto estimado. ¿Cuánto pagaste?` };
     }
-    const fecha = isDate(raw.fecha) ? raw.fecha : today();
+    // "Ya pagué X" resuelve el ciclo que está esperando confirmación, que es
+    // justamente el ancla del servicio. Se registra igual que el botón
+    // "Confirmar": con cycle_date, para que el ciclo quede marcado como resuelto
+    // y no desaparezca sin rastro cuando el ancla avance.
+    const cycleDate = isRecurring(srv.billing_cycle) ? srv.next_renewal_date : null;
+    // La fecha del pago es la del ciclo (así cae en la rendición del mes que
+    // corresponde), salvo que el usuario aclare otra explícitamente.
+    const fecha = isDate(raw.fecha) ? raw.fecha : cycleDate ?? today();
 
-    // Próxima renovación: un ciclo después de la fecha guardada, adelantada a hoy-o-futuro
-    const afterOne = nextCycleDate(srv.next_renewal_date, srv.billing_cycle);
-    const nextRenewal = afterOne ? upcomingRenewal(afterOne, srv.billing_cycle) : srv.next_renewal_date;
+    // Próxima renovación: EXACTAMENTE un ciclo después del ancla.
+    // Antes acá se hacía upcomingRenewal(nextCycleDate(...)), que saltaba al
+    // primer ciclo futuro y se comía en silencio todos los ciclos atrasados que
+    // todavía estaban esperando confirmación.
+    const nextRenewal =
+      nextCycleDate(srv.next_renewal_date, srv.billing_cycle, anchorDayOf(srv)) ?? srv.next_renewal_date;
 
     const input: PaymentInput = {
       service_id: srv.id,
       category_id: srv.category_id,
-      description: `${srv.name} — ${BILLING_CYCLE_LABELS[srv.billing_cycle]}`,
+      description: cycleDate
+        ? `${srv.name} — ${periodLabel(cycleDate, srv.billing_cycle)}`
+        : `${srv.name} — ${BILLING_CYCLE_LABELS[srv.billing_cycle]}`,
       amount: monto,
       currency: srv.currency,
       exchange_rate: null,
@@ -424,10 +469,10 @@ export async function buildProposal(
 
     return {
       tool,
-      title: "Registrar pago del servicio",
+      title: cycleDate ? `Registrar pago del servicio — ${periodLabel(cycleDate, srv.billing_cycle)}` : "Registrar pago del servicio",
       fields,
       warnings,
-      args: { input, serviceId: srv.id, nextRenewal },
+      args: { input, serviceId: srv.id, nextRenewal, cycleDate },
     };
   }
 
@@ -455,6 +500,7 @@ export async function buildProposal(
 
     const yaRendidos = found.filter((p) => p.rendido_at).length;
     if (yaRendidos > 0) warnings.push(`${yaRendidos} de estos pagos ya estaban rendidos (se incluyen igual en el PDF).`);
+    warnings.push(...(await avisoCargosSinConfirmar(mes)));
 
     return {
       tool,
@@ -476,11 +522,25 @@ export async function buildProposal(
     if (idsRaw.length > 0) {
       // Camino por ids explícitos (de los DATOS)
       const all = await listPayments({});
-      found = all.filter((p) => idsRaw.includes(p.id));
-      if (found.length === 0) return { error: "No encontré los pagos indicados." };
-      if (found.length < idsRaw.length) warnings.push(`${idsRaw.length - found.length} de los pagos indicados no existen y se ignoran.`);
+      const pedidos = all.filter((p) => idsRaw.includes(p.id));
+      // Solo se rinde lo efectivamente pagado. Si no se filtraran acá, la
+      // tarjeta listaría pagos pendientes/fallidos que después executeAction
+      // descarta, y el usuario confirmaría una lista que no es la que se marca.
+      found = pedidos.filter((p) => p.status === "paid");
+      if (found.length === 0) return { error: "No encontré pagos confirmados entre los indicados." };
+      const noConfirmados = pedidos.length - found.length;
+      if (noConfirmados > 0) {
+        warnings.push(`${noConfirmados} no están en estado Pagado y quedan afuera de la rendición.`);
+      }
+      if (pedidos.length < idsRaw.length) {
+        warnings.push(`${idsRaw.length - pedidos.length} de los pagos indicados no existen y se ignoran.`);
+      }
       const yaRendidos = found.filter((p) => p.rendido_at);
-      if (yaRendidos.length > 0) warnings.push(`${yaRendidos.length} ya estaban rendidos: se vuelven a marcar con la fecha de hoy.`);
+      // setPaymentsRendido solo toca los que están pendientes, justamente para
+      // no pisar la fecha real de la primera presentación al contador.
+      if (yaRendidos.length > 0) {
+        warnings.push(`${yaRendidos.length} ya estaban rendidos: conservan su fecha original y no se vuelven a marcar.`);
+      }
     } else if (hasFilter) {
       // Camino por mes/nombre: solo los pendientes de rendir
       const r = await resolveRendicionPayments(raw);
@@ -501,6 +561,7 @@ export async function buildProposal(
       value: `${p.description || p.service?.name || p.provider || "Pago"} — ${formatMoney(Number(p.amount), p.currency)}`,
     }));
     if (found.length > MAX) fields.push({ label: "…", value: `y ${found.length - MAX} pago(s) más` });
+    warnings.push(...(await avisoCargosSinConfirmar(mes)));
 
     return {
       tool,
@@ -512,6 +573,21 @@ export async function buildProposal(
   }
 
   return { error: `Herramienta desconocida: ${tool}` };
+}
+
+/**
+ * Ids de pagos que llegan en los args de una acción ya confirmada.
+ * Devuelve null si no vino ninguno.
+ *
+ * Es un guardarraíl, no una formalidad: resolveRendicionPayments interpreta
+ * "sin ids" como "no filtres", así que un pedido a /api/chat/execute con args
+ * vacíos terminaba marcando como rendidos TODOS los pagos de la base. El
+ * endpoint recibe los args del cliente, así que acá no se puede confiar en que
+ * buildProposal ya los completó.
+ */
+function idsExplicitos(args: Record<string, unknown>): string[] | null {
+  const ids = Array.isArray(args.ids) ? args.ids.filter((x): x is string => typeof x === "string" && x !== "") : [];
+  return ids.length > 0 ? ids : null;
 }
 
 // ---------- Ejecución (después de la confirmación del usuario) ----------
@@ -538,7 +614,15 @@ export async function executeAction(
     const input = args.input as PaymentInput;
     const serviceId = args.serviceId as string;
     const nextRenewal = (args.nextRenewal as string | null) ?? null;
-    const r = await createPayment(input, [], userId);
+    const cycleDate = typeof args.cycleDate === "string" ? args.cycleDate : null;
+
+    // Con ciclo: se registra como cargo del período (mismo camino que el botón
+    // "Confirmar"), así el índice único impide pagarlo dos veces y el ciclo
+    // queda marcado como resuelto. Sin ciclo (one_time, a demanda): pago suelto.
+    const r: { id?: string; error?: string; duplicate?: boolean } = cycleDate
+      ? await createCyclePayment(input, cycleDate, userId)
+      : await createPayment(input, [], userId);
+    if (r.duplicate) return { ok: false, message: "Ese período ya estaba registrado." };
     if (r.error || !r.id) return { ok: false, message: r.error ?? "No se pudo registrar el pago." };
     if (nextRenewal) await setServiceRenewal(serviceId, nextRenewal);
     return {
@@ -551,7 +635,8 @@ export async function executeAction(
   }
 
   if (tool === "generar_rendicion") {
-    const ids = (args.ids as string[]) ?? [];
+    const ids = idsExplicitos(args);
+    if (!ids) return { ok: false, message: "No recibí qué pagos incluir en la rendición." };
     const { found } = await resolveRendicionPayments({ pago_ids: ids });
     if (found.length === 0) return { ok: false, message: "No encontré los pagos de la rendición." };
 
@@ -571,12 +656,16 @@ export async function executeAction(
   }
 
   if (tool === "marcar_rendido") {
-    const ids = (args.ids as string[]) ?? [];
+    const ids = idsExplicitos(args);
+    if (!ids) return { ok: false, message: "No recibí qué pagos marcar como rendidos." };
     const { found } = await resolveRendicionPayments({ pago_ids: ids });
     if (found.length === 0) return { ok: false, message: "No encontré los pagos a rendir." };
 
     const r = await setPaymentsRendido(found.map((p) => p.id), true);
     if (r.error) return { ok: false, message: r.error };
+    if (r.updated === 0) {
+      return { ok: false, message: "Esos pagos ya estaban rendidos: conservan su fecha de presentación original." };
+    }
 
     const label = typeof args.label === "string" ? args.label : formatDate(today());
     const mes = typeof args.mes === "string" ? args.mes : null;

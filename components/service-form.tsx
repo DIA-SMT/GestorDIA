@@ -12,11 +12,14 @@ export default function ServiceForm({
   categories,
   service,
   submitLabel = "Guardar servicio",
+  cargosPendientes = 0,
 }: {
   action: Action;
   categories: Category[];
   service?: Service;
   submitLabel?: string;
+  /** Cargos de este servicio esperando confirmación (se pierden si se adelanta la fecha) */
+  cargosPendientes?: number;
 }) {
   const [state, formAction, pending] = useActionState(action, {});
   const [cycle, setCycle] = useState<BillingCycle>(service?.billing_cycle ?? "monthly");
@@ -93,6 +96,15 @@ export default function ServiceForm({
           <div style={grid2}>
             <Field label="Próxima fecha de cobro">
               <input name="next_renewal_date" type="date" className="input" defaultValue={service?.next_renewal_date ?? ""} />
+              {cargosPendientes > 0 && (
+                <span style={{ fontSize: "0.75rem", color: "#fbbf24" }}>
+                  ⚠ Hay {cargosPendientes} cargo{cargosPendientes === 1 ? "" : "s"} sin confirmar desde esta
+                  fecha. Si la adelantás, esos períodos dejan de proponerse y no se pueden recuperar.
+                </span>
+              )}
+              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                Es el próximo cobro que todavía no se registró. Cada vez que confirmes uno, avanza sola.
+              </span>
             </Field>
             <Field label="Estado">
               <select name="status" className="select" defaultValue={service?.status ?? "active"}>

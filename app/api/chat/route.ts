@@ -4,7 +4,8 @@
 // muestra como tarjeta de confirmación; /api/chat/execute las ejecuta.
 
 import { getCurrentUser, listPayments, listServices, listCategories } from "@/lib/data";
-import { toARS, daysUntil, effectiveRenewal } from "@/lib/utils";
+import { loadPendingCharges } from "@/lib/pending";
+import { toARS, daysUntil, effectiveRenewal, anchorDayOf, todayISO } from "@/lib/utils";
 import { BILLING_CYCLE_LABELS, RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS, SERVICE_STATUS_LABELS } from "@/lib/types";
 import { TOOL_DEFS, buildProposal } from "@/lib/assistant-tools";
 
@@ -24,14 +25,30 @@ GUÍA DE LA APP (usala para ayudar al usuario a usar gestorDIA):
 - Detalle de pago (/pagos/[id]): vista tipo ticket. Botón "Editar" para modificar cualquier campo (ahí se corrige una cotización faltante), adjuntar o borrar recibos, y eliminar el pago.
 - Servicios (/servicios): tarjetas por servicio con el gasto real acumulado (suma de pagos hechos) y el monto estimado por ciclo. "+ Nuevo servicio" (/servicios/nuevo): nombre, categoría, ciclo de facturación (mensual, anual, único, recarga a demanda, etc.), monto estimado, modo de pago (débito automático = se cobra solo e informa; manual = genera alerta para pagarlo), próxima renovación.
 - Detalle de servicio (/servicios/[id]): historial de pagos de ese servicio con total, y edición del servicio.
-- Rendición (/rendicion): elegir el mes arriba. Buscador por nombre/proveedor/monto y filtro por categoría. Se seleccionan pagos con los checkboxes (o "seleccionar todos"), se exportan con los botones CSV o PDF (exportan la selección, o todos los pendientes filtrados si no hay selección) y se marcan con "✓ Marcar como rendidos". Los rendidos pasan a la lista de abajo con fecha y botón "↩ Deshacer". El PDF sale con membrete y totales, listo para el contador.
+- Rendición (/rendicion): elegir el mes arriba. Buscador por nombre/proveedor/monto y filtro por categoría. Se seleccionan pagos con los checkboxes (o "seleccionar todos"); si no se selecciona nada, se toman todos los pendientes filtrados. Botones: "🖨 PDF para imprimir y rendir" (genera el PDF Y marca esos pagos como rendidos, con una barra "↩ Deshacer todo" por si la descarga no llegó a completarse), "👁 Vista previa (no marca)" para mirarlo sin cerrar el mes, y "⬇ CSV". Los rendidos pasan a la lista de abajo con fecha, un botón "↩ Deshacer" por fila y "↻ Reimprimir PDF" si el contador lo vuelve a pedir. Solo se rinden los pagos en estado Pagado: los pendientes, fallidos o reembolsados quedan fuera y se avisa. El PDF sale con membrete, totales y los recibos adjuntos incrustados.
 - Categorías (/categorias): crear categorías con nombre y color, editarlas o borrarlas.
 
 PROBLEMAS COMUNES:
 - "El gasto del mes en ARS da $0 o menos de lo esperado": hay pagos en USD sin cotización cargada; no se pueden convertir. Solución: entrar al pago → Editar → completar "Cotización".
 - "No encuentro un pago en rendición": verificar que el mes elegido sea el correcto (usa la fecha de pago) y que no esté ya abajo en la lista de Rendidos.
-- "Quiero deshacer una rendición": en /rendicion, sección Rendidos, botón "↩ Deshacer" en la fila.
-- "Un servicio aparece vencido": editar el servicio y actualizar la fecha de próxima renovación después de pagarlo (registrar el pago no la actualiza sola).
+- "Quiero deshacer una rendición": en /rendicion, sección Rendidos, botón "↩ Deshacer" en la fila (o "↩ Deshacer todo" en la barra verde, si acabás de bajar el PDF).
+- "Bajé el PDF sin querer y me marcó todo": barra verde arriba → "↩ Deshacer todo". Para mirar sin marcar, la próxima vez usá "👁 Vista previa".
+- "Un servicio aparece vencido": si es recurrente, ahora aparece arriba del dashboard como "cargo por confirmar" y se resuelve con el botón Confirmar (crea el pago del período con la fecha del ciclo, no la de hoy).
+- "Falta un gasto mensual en la rendición": seguro está sin confirmar. Dashboard → "⚡ Cargos por confirmar" → Confirmar. Recién ahí se crea el pago y entra en la rendición del mes que corresponde.
+- "Un servicio dado de baja sigue proponiendo el gasto": en la tarjeta del cargo, botón "Ya no lo usamos" (o poner el servicio en Cancelada desde /servicios).
+- "Se cobró distinto de lo estimado": confirmá igual y después entrá al pago y editá el monto; o corregí el monto estimado del servicio antes de confirmar.
+`;
+
+const RECURRENTES_GUIDE = `
+CARGOS RECURRENTES (importante):
+Los servicios mensuales/anuales NO generan el gasto solos. Cada vez que renuevan, el sistema
+PROPONE el cargo en el dashboard ("⚡ Cargos por confirmar") y el usuario decide:
+- "✓ Confirmar": crea el pago del período, con la fecha del ciclo (no la de hoy), heredando
+  proveedor, CUIT, tipo de comprobante y cotización del último pago de ese servicio.
+- "Omitir este período": no se cobró ese mes, pero el servicio sigue vivo.
+- "Ya no lo usamos": da de baja el servicio y deja de proponer.
+Un servicio anual propone una sola vez por año; uno mensual, una vez por mes. Mientras un cargo
+no se confirma NO existe como pago: no suma en los totales ni aparece en la rendición.
 `;
 
 const TOOLS_GUIDE = `
@@ -59,10 +76,11 @@ const PAGE_LABELS: [RegExp, string][] = [
 ];
 
 async function buildSystemPrompt(path: string | null): Promise<string> {
-  const [payments, services, categories] = await Promise.all([
+  const [payments, services, categories, pending] = await Promise.all([
     listPayments({}),
     listServices(),
     listCategories(),
+    loadPendingCharges(),
   ]);
 
   const pagos = payments.slice(0, MAX_PAYMENTS).map((p) => ({
@@ -91,18 +109,32 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
     moneda: s.currency,
     estado: SERVICE_STATUS_LABELS[s.status],
     modo_pago: s.payment_mode === "manual" ? "manual (hay que pagarlo)" : "débito automático",
-    proxima_renovacion: effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode),
+    proxima_renovacion: effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s)),
   }));
 
-  const hoy = new Date().toISOString().slice(0, 10);
+  const hoy = todayISO();
   const pageLabel = path ? PAGE_LABELS.find(([re]) => re.test(path))?.[1] ?? null : null;
+
+  // Cargos recurrentes esperando el OK del usuario: son gastos que TODAVÍA no
+  // existen como pago, así que no están en la lista de pagos ni en la rendición.
+  const porConfirmar = pending.groups
+    .flatMap((g) => g.charges)
+    .map((c) => ({
+      servicio: c.serviceName,
+      periodo: c.periodo,
+      fecha_del_cobro: c.cycleDate,
+      monto_estimado: c.amount,
+      moneda: c.currency,
+      modo: c.auto ? "débito automático" : "manual",
+      posible_duplicado: c.duplicate ? `ya hay un pago del ${c.duplicate.date}` : null,
+    }));
 
   // Alertas activas: próximos cobros (≤30 días). Automáticos usan el próximo
   // débito futuro (el anterior ya se cobró); manuales incluyen vencidos.
   const alertas = services
     .filter((s) => s.status === "active" && s.next_renewal_date)
     .map((s) => {
-      const fecha = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode)!;
+      const fecha = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s))!;
       return { s, fecha, d: daysUntil(fecha)!, auto: s.payment_mode !== "manual" };
     })
     .filter(({ d, auto }) => (auto ? d >= 0 && d <= 30 : d <= 30))
@@ -125,6 +157,7 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
     'Sobre rendición: "rendido_el" con fecha significa que ese pago ya se presentó al contador; null significa pendiente de rendir.',
     "Los pagos con cotización null no tienen equivalente en ARS (conviene sugerir cargarla si preguntan por totales en pesos).",
     APP_GUIDE,
+    RECURRENTES_GUIDE,
     TOOLS_GUIDE,
     pageLabel
       ? `PÁGINA ACTUAL: el usuario está ahora mismo en "${pageLabel}" (${path}). Si pide ayuda sin dar contexto, asumí que es sobre esta pantalla.`
@@ -134,6 +167,9 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
     alertas.length > 0
       ? `ALERTAS ACTIVAS (próximos cobros en ≤30 días o vencidos — priorizá esto si preguntan qué hay pendiente o por vencer): ${JSON.stringify(alertas)}`
       : "ALERTAS ACTIVAS: ninguna por ahora.",
+    porConfirmar.length > 0
+      ? `CARGOS POR CONFIRMAR (${porConfirmar.length}): renovaciones que ya ocurrieron y todavía NO son un pago cargado. No figuran en la lista de pagos ni suman en los totales ni entran en la rendición hasta que el usuario los confirme en el dashboard. Si te preguntan por el gasto del mes o por la rendición y hay cargos acá, avisá que faltan confirmar: ${JSON.stringify(porConfirmar)}`
+      : "CARGOS POR CONFIRMAR: ninguno, está todo al día.",
     `Categorías: ${JSON.stringify(categories.map((c) => c.name))}`,
     `Servicios: ${JSON.stringify(servicios)}`,
     `Pagos (${pagos.length} más recientes): ${JSON.stringify(pagos)}`,

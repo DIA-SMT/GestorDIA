@@ -1,19 +1,27 @@
 "use client";
 
-// Tabla interactiva de rendición: filtrar → seleccionar → exportar (CSV/PDF)
-// → marcar como rendidos. Los rendidos pasan a una lista aparte abajo.
+// Tabla interactiva de rendición: filtrar → seleccionar → exportar → rendir.
+//
+// El botón principal es "PDF para imprimir y rendir": genera el PDF y, si salió
+// bien, marca esos pagos como rendidos. Hay una vista previa que NO marca, y
+// una barra de deshacer con los ids exactos que se marcaron.
 
 import { useMemo, useState, useTransition } from "react";
 import Link from "next/link";
 import type { Category, Payment } from "@/lib/types";
 import { RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS } from "@/lib/types";
-import { formatMoney, formatDate, toARS } from "@/lib/utils";
+import { formatMoney, formatDate, toARS, toLocalDay } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import { marcarRendidos, firmarRecibos } from "@/app/(dashboard)/rendicion/actions";
-import { downloadRendicionPdf } from "@/lib/rendicion-pdf";
+import { downloadRendicionPdf, triggerDownload, type RendicionPdfResult } from "@/lib/rendicion-pdf";
 
 type ReceiptLite = { id: string; file_path?: string; file_name?: string; mime_type?: string | null };
 type Row = Payment & { receipts?: ReceiptLite[] };
+
+type Aviso = { tipo: "ok" | "warn" | "error"; texto: string };
+
+// "1 pago" / "3 pagos"
+const plural = (n: number, singular: string, plural_: string) => `${n} ${n === 1 ? singular : plural_}`;
 
 export default function RendicionTable({
   payments,
@@ -29,8 +37,9 @@ export default function RendicionTable({
   const [q, setQ] = useState("");
   const [cat, setCat] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [error, setError] = useState<string | null>(null);
-  const [exporting, setExporting] = useState<null | "csv" | "pdf">(null);
+  const [aviso, setAviso] = useState<Aviso | null>(null);
+  const [exporting, setExporting] = useState<null | "csv" | "pdf" | "previa" | "reimprimir">(null);
+  const [ultimaTanda, setUltimaTanda] = useState<string[]>([]);
   const [isPending, startTransition] = useTransition();
 
   // Filtro: por texto (descripción, proveedor, servicio, nro comprobante)
@@ -54,8 +63,15 @@ export default function RendicionTable({
   const pendientes = filtered.filter((p) => !p.rendido_at);
   const rendidos = filtered.filter((p) => p.rendido_at);
 
-  // Lo que se exporta / marca: la selección, o todos los pendientes filtrados
-  const target = selected.size > 0 ? pendientes.filter((p) => selected.has(p.id)) : pendientes;
+  // Al contador solo se le rinde lo que efectivamente se pagó. Un pago
+  // pendiente, fallido o reembolsado no puede entrar en el PDF ni cerrarse
+  // como rendido: si después se concreta, tiene que volver a aparecer.
+  const rendibles = pendientes.filter((p) => p.status === "paid");
+  const noConfirmados = pendientes.filter((p) => p.status !== "paid");
+
+  // Lo que se exporta / marca: la selección, o todos los rendibles filtrados
+  const target = selected.size > 0 ? rendibles.filter((p) => selected.has(p.id)) : rendibles;
+  const sinCotizacion = target.filter((p) => toARS(Number(p.amount), p.currency, p.exchange_rate) == null);
 
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -65,37 +81,55 @@ export default function RendicionTable({
       return next;
     });
 
-  const allSelected = pendientes.length > 0 && pendientes.every((p) => selected.has(p.id));
+  const allSelected = rendibles.length > 0 && rendibles.every((p) => selected.has(p.id));
   const toggleAll = () =>
-    setSelected(allSelected ? new Set() : new Set(pendientes.map((p) => p.id)));
+    setSelected(allSelected ? new Set() : new Set(rendibles.map((p) => p.id)));
 
   const totalARS = (rows: Row[]) =>
     rows.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
   const totalUSD = (rows: Row[]) =>
     rows.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
 
-  function marcar(ids: string[], rendido: boolean) {
-    setError(null);
+  function marcar(
+    ids: string[],
+    rendido: boolean,
+    mensaje?: (n: number) => string,
+    alTerminar?: (marcados: number) => void
+  ) {
     startTransition(async () => {
-      const r = await marcarRendidos(ids, rendido);
-      if (r?.error) setError(r.error);
-      else setSelected(new Set());
+      let r: { error?: string; updated: number };
+      try {
+        r = await marcarRendidos(ids, rendido);
+      } catch {
+        setAviso({ tipo: "error", texto: "No se pudo guardar el cambio. Probá de nuevo." });
+        alTerminar?.(0);
+        return;
+      }
+      if (r?.error) {
+        setAviso({ tipo: "error", texto: r.error });
+        alTerminar?.(0);
+        return;
+      }
+      setSelected(new Set());
+      if (mensaje) setAviso({ tipo: "ok", texto: mensaje(r.updated ?? ids.length) });
+      if (!rendido) setUltimaTanda([]);
+      alTerminar?.(r.updated ?? 0);
     });
   }
 
   // ---------- Exportar ----------
   // Firma en lote las URLs de todos los recibos de las filas dadas (una sola
-  // llamada al servidor). Devuelve un mapa file_path -> URL firmada (o null).
-  async function signAll(rows: Row[]): Promise<Record<string, string | null>> {
+  // llamada al servidor). Devuelve el mapa y si la firma falló por completo.
+  async function signAll(rows: Row[]): Promise<{ urls: Record<string, string | null>; fallo: boolean }> {
     const paths = rows
       .flatMap((p) => p.receipts ?? [])
       .map((r) => r.file_path)
       .filter((p): p is string => !!p);
-    if (paths.length === 0) return {};
+    if (paths.length === 0) return { urls: {}, fallo: false };
     try {
-      return await firmarRecibos([...new Set(paths)]);
+      return { urls: await firmarRecibos([...new Set(paths)]), fallo: false };
     } catch {
-      return {};
+      return { urls: {}, fallo: true };
     }
   }
 
@@ -126,8 +160,9 @@ export default function RendicionTable({
   async function downloadCsv() {
     if (target.length === 0) return;
     setExporting("csv");
+    setAviso(null);
     try {
-      const urls = await signAll(target);
+      const { urls } = await signAll(target);
       const rows = exportRows(target, urls);
       const headers = Object.keys(rows[0]) as (keyof (typeof rows)[0])[];
       const escape = (v: string | number | null) => {
@@ -138,97 +173,242 @@ export default function RendicionTable({
         headers.join(";"),
         ...rows.map((r) => headers.map((h) => escape(r[h])).join(";")),
       ].join("\r\n");
-      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-      triggerDownload(blob, `rendicion-${mes}.csv`);
+      triggerDownload(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" }), `rendicion-${mes}.csv`);
+    } catch {
+      setAviso({ tipo: "error", texto: "No se pudo generar el CSV." });
     } finally {
       setExporting(null);
     }
   }
 
-  async function downloadPdf() {
-    if (target.length === 0) return;
-    setExporting("pdf");
-    try {
-      const urls = await signAll(target);
-      await downloadRendicionPdf({
-        title: `Rendición de cuentas — ${mesLabel}`,
-        rows: target.map((p) => ({
-          fecha: formatDate(p.payment_date),
-          proveedor: p.provider ?? "",
-          cuit: p.provider_tax_id ?? "",
-          descripcion: p.description ?? p.service?.name ?? "",
-          comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
-          nro: p.receipt_number ?? "",
-          moneda: p.currency,
-          monto: Number(p.amount),
-          ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
-          recibo: (p.receipts?.length ?? 0) > 0,
-          receipts: (p.receipts ?? []).map((r) => ({
-            file_name: r.file_name ?? "recibo",
-            mime_type: r.mime_type ?? null,
-            url: r.file_path ? urls[r.file_path] ?? null : null,
-          })),
+  // Genera el PDF de un conjunto de filas. No marca nada: eso lo decide quien llama.
+  async function generarPdf(rows: Row[], titulo: string, filename: string): Promise<RendicionPdfResult> {
+    const { urls, fallo } = await signAll(rows);
+    if (fallo) {
+      return { ok: false, filas: rows.length, incrustados: 0, fallidos: 0, error: "No se pudieron firmar los recibos." };
+    }
+    return downloadRendicionPdf({
+      title: titulo,
+      rows: rows.map((p) => ({
+        fecha: formatDate(p.payment_date),
+        proveedor: p.provider ?? "",
+        cuit: p.provider_tax_id ?? "",
+        descripcion: p.description ?? p.service?.name ?? "",
+        comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
+        nro: p.receipt_number ?? "",
+        moneda: p.currency,
+        monto: Number(p.amount),
+        ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
+        recibo: (p.receipts?.length ?? 0) > 0,
+        receipts: (p.receipts ?? []).map((r) => ({
+          file_name: r.file_name ?? "recibo",
+          mime_type: r.mime_type ?? null,
+          url: r.file_path ? urls[r.file_path] ?? null : null,
         })),
-        totalARS: totalARS(target),
-        totalUSD: totalUSD(target),
-        filename: `rendicion-${mes}.pdf`,
-      });
+      })),
+      totalARS: totalARS(rows),
+      totalUSD: totalUSD(rows),
+      filename,
+    });
+  }
+
+  function resumenPdf(r: RendicionPdfResult): string {
+    if (r.fallidos === 0) return r.incrustados > 0 ? ` ${r.incrustados} recibo(s) incrustado(s).` : "";
+    return ` ⚠ ${r.fallidos} recibo(s) no se pudieron incrustar (figuran como "Error" en la columna Recibo).`;
+  }
+
+  // PDF que además marca como rendidos: es el circuito que pidió el usuario
+  // (bajo el PDF para imprimir → esos pagos quedan presentados).
+  async function pdfYRendir() {
+    // Se congela la lista ANTES de cualquier await: armar el PDF con recibos
+    // puede tardar, y si mientras tanto cambia un filtro se marcaría un
+    // conjunto distinto del que se imprimió.
+    const rows = [...target];
+    const ids = rows.map((p) => p.id);
+    if (ids.length === 0) return;
+
+    setExporting("pdf");
+    setAviso(null);
+    try {
+      const r = await generarPdf(rows, `Rendición de cuentas — ${mesLabel}`, `rendicion-${mes}.pdf`);
+      if (!r.ok) {
+        setAviso({ tipo: "error", texto: `No se generó el PDF (${r.error ?? "error desconocido"}). No se marcó nada.` });
+        return;
+      }
+      // La barra de deshacer se muestra SOLO si el marcado salió bien: antes
+      // aparecía siempre, así que un fallo al guardar dejaba un cartel verde
+      // diciendo que el mes había quedado presentado cuando no lo estaba.
+      marcar(
+        ids,
+        true,
+        () => `PDF descargado.${resumenPdf(r)}`,
+        (marcados) => setUltimaTanda(marcados > 0 ? ids : [])
+      );
     } finally {
       setExporting(null);
     }
   }
 
-  function triggerDownload(blob: Blob, filename: string) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    a.click();
-    URL.revokeObjectURL(url);
+  async function vistaPrevia() {
+    const rows = [...target];
+    if (rows.length === 0) return;
+    setExporting("previa");
+    setAviso(null);
+    try {
+      const r = await generarPdf(rows, `Rendición de cuentas (borrador) — ${mesLabel}`, `rendicion-${mes}-borrador.pdf`);
+      setAviso(
+        r.ok
+          ? { tipo: "ok", texto: `Borrador descargado. No se marcó nada como rendido.${resumenPdf(r)}` }
+          : { tipo: "error", texto: `No se generó el PDF: ${r.error ?? "error desconocido"}.` }
+      );
+    } finally {
+      setExporting(null);
+    }
   }
 
-  const exportLabel = selected.size > 0 ? `${selected.size} seleccionados` : `${pendientes.length} pendientes`;
+  // Reimprimir lo ya rendido, sin tocar las marcas
+  async function reimprimir() {
+    const rows = [...rendidos];
+    if (rows.length === 0) return;
+    setExporting("reimprimir");
+    setAviso(null);
+    try {
+      const r = await generarPdf(rows, `Rendición de cuentas — ${mesLabel}`, `rendicion-${mes}-reimpresion.pdf`);
+      setAviso(
+        r.ok
+          ? { tipo: "ok", texto: `Reimpresión descargada (${rows.length} pagos ya rendidos).${resumenPdf(r)}` }
+          : { tipo: "error", texto: `No se generó el PDF: ${r.error ?? "error desconocido"}.` }
+      );
+    } finally {
+      setExporting(null);
+    }
+  }
+
+  // Cuenta `target`, no `selected`: la selección sobrevive a cambiar el filtro,
+  // así que podés tener 5 marcados y solo 2 visibles. El botón tiene que decir
+  // lo que realmente va a imprimir y marcar.
+  const exportLabel =
+    selected.size > 0
+      ? plural(target.length, "seleccionado", "seleccionados")
+      : plural(rendibles.length, "pendiente", "pendientes");
+  const seleccionOculta = selected.size > target.length;
+  const trabajando = exporting !== null || isPending;
 
   return (
     <div style={{ display: "grid", gap: "1.5rem" }}>
       {/* Filtros + acciones */}
-      <div className="card" style={{ padding: "1rem 1.25rem", display: "flex", gap: "0.75rem", alignItems: "end", flexWrap: "wrap" }}>
-        <div style={{ flex: "1 1 220px" }}>
-          <span className="label">Buscar por nombre, proveedor o monto</span>
-          <input
-            className="input"
-            placeholder='Ej: "Claude" o 25 o 27000'
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-          />
+      <div className="card" style={{ padding: "1rem 1.25rem", display: "grid", gap: "0.75rem" }}>
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "end", flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 220px" }}>
+            <span className="label">Buscar por nombre, proveedor o monto</span>
+            <input
+              className="input"
+              placeholder='Ej: "Claude" o 25 o 27000'
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </div>
+          <div>
+            <span className="label">Categoría</span>
+            <select className="select" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: "auto", minWidth: 160 }}>
+              <option value="">Todas</option>
+              {categories.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </div>
+          <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={pdfYRendir}
+              disabled={target.length === 0 || trabajando}
+              title="Genera el PDF y da esos pagos por presentados al contador"
+            >
+              {exporting === "pdf" ? "Armando PDF…" : `🖨 PDF para imprimir y rendir (${exportLabel})`}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={vistaPrevia} disabled={target.length === 0 || trabajando}>
+              {exporting === "previa" ? "…" : "👁 Vista previa (no marca)"}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={downloadCsv} disabled={target.length === 0 || trabajando}>
+              {exporting === "csv" ? "…" : "⬇ CSV"}
+            </button>
+          </div>
         </div>
-        <div>
-          <span className="label">Categoría</span>
-          <select className="select" value={cat} onChange={(e) => setCat(e.target.value)} style={{ width: "auto", minWidth: 160 }}>
-            <option value="">Todas</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
-          </select>
-        </div>
-        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
-          <button type="button" className="btn btn-ghost" onClick={downloadCsv} disabled={target.length === 0 || exporting !== null}>
-            {exporting === "csv" ? "Generando…" : `⬇ CSV (${exportLabel})`}
-          </button>
-          <button type="button" className="btn btn-ghost" onClick={downloadPdf} disabled={target.length === 0 || exporting !== null}>
-            {exporting === "pdf" ? "Armando PDF con recibos…" : `⬇ PDF (${exportLabel})`}
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={selected.size === 0 || isPending}
-            onClick={() => marcar([...selected], true)}
-          >
-            {isPending ? "…" : `✓ Marcar como rendidos (${selected.size})`}
-          </button>
-        </div>
-        {error && <p style={{ color: "#f87171", fontSize: "0.85rem", flexBasis: "100%", margin: 0 }}>{error}</p>}
+
+        {sinCotizacion.length > 0 && (
+          <p style={{ margin: 0, fontSize: "0.8rem", color: "#fbbf24" }}>
+            ⚠ {plural(sinCotizacion.length, "pago no tiene", "pagos no tienen")} cotización cargada
+            {target.length > sinCotizacion.length ? ` (de ${target.length})` : ""}: no {sinCotizacion.length === 1 ? "suma" : "suman"} en
+            el total en ARS del PDF. Cargásela desde el pago si querés que entre.
+          </p>
+        )}
+        {seleccionOculta && (
+          <p style={{ margin: 0, fontSize: "0.8rem", color: "#fbbf24" }}>
+            ⚠ Tenés {selected.size} pagos seleccionados pero el filtro actual solo muestra {target.length}.
+            Se van a incluir esos {target.length}.
+          </p>
+        )}
+        {noConfirmados.length > 0 && (
+          <p style={{ margin: 0, fontSize: "0.8rem", color: "var(--text-muted)" }}>
+            {noConfirmados.length} {noConfirmados.length === 1 ? "pago no confirmado queda" : "pagos no confirmados quedan"} fuera
+            de la rendición (pendiente / fallido / reembolsado). Van a volver a aparecer cuando los pases a “Pagado”.
+          </p>
+        )}
+        {/* Región viva: el resultado se anuncia sin que haya que ir a buscarlo */}
+        <p
+          role="status"
+          aria-live="polite"
+          style={{
+            margin: 0,
+            fontSize: "0.85rem",
+            color: !aviso ? undefined : aviso.tipo === "ok" ? "#6ee7b7" : aviso.tipo === "warn" ? "#fbbf24" : "#f87171",
+          }}
+        >
+          {aviso ? `${aviso.tipo === "ok" ? "✓ " : "⚠ "}${aviso.texto}` : ""}
+        </p>
       </div>
+
+      {/* Deshacer la última tanda marcada */}
+      {ultimaTanda.length > 0 && (
+        <div
+          className="card"
+          style={{
+            padding: "0.8rem 1.1rem",
+            borderColor: "rgba(52,211,153,.35)",
+            background: "rgba(52,211,153,.05)",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "1rem",
+            flexWrap: "wrap",
+          }}
+        >
+          <span style={{ fontSize: "0.85rem" }}>
+            ✓ {plural(ultimaTanda.length, "pago quedó presentado", "pagos quedaron presentados")} al contador.
+            <span className="muted"> Si la descarga no llegó a completarse, podés revertirlo.</span>
+          </span>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ padding: "0.3rem 0.7rem", fontSize: "0.8rem" }}
+              disabled={trabajando}
+              onClick={() => marcar(ultimaTanda, false, (n) => `${plural(n, "pago volvió", "pagos volvieron")} a pendientes.`)}
+            >
+              ↩ Deshacer todo
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              style={{ padding: "0.3rem 0.7rem", fontSize: "0.8rem" }}
+              onClick={() => setUltimaTanda([])}
+            >
+              Listo ✕
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Pendientes de rendir */}
       <section className="card" style={{ overflow: "hidden" }}>
@@ -276,8 +456,20 @@ export default function RendicionTable({
         <div style={{ padding: "1.1rem 1.25rem 0.4rem", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "1rem", flexWrap: "wrap" }}>
           <h2 style={{ fontSize: "1.02rem", fontWeight: 600, margin: 0, color: "#6ee7b7" }}>✓ Rendidos ({rendidos.length})</h2>
           {rendidos.length > 0 && (
-            <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-              Total: {formatMoney(totalARS(rendidos), "ARS")}{totalUSD(rendidos) > 0 ? ` · ${formatMoney(totalUSD(rendidos), "USD")}` : ""}
+            <span style={{ display: "flex", alignItems: "center", gap: "0.8rem", flexWrap: "wrap" }}>
+              <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                Total: {formatMoney(totalARS(rendidos), "ARS")}{totalUSD(rendidos) > 0 ? ` · ${formatMoney(totalUSD(rendidos), "USD")}` : ""}
+              </span>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+                disabled={trabajando}
+                onClick={reimprimir}
+                title="Vuelve a generar el PDF de lo ya rendido, sin cambiar nada"
+              >
+                {exporting === "reimprimir" ? "…" : "↻ Reimprimir PDF"}
+              </button>
             </span>
           )}
         </div>
@@ -318,13 +510,13 @@ export default function RendicionTable({
                     <Td muted style={{ textAlign: "right" }}>
                       {formatMoney(toARS(Number(p.amount), p.currency, p.exchange_rate), "ARS")}
                     </Td>
-                    <Td muted>{formatDate(p.rendido_at?.slice(0, 10))}</Td>
+                    <Td muted>{formatDate(toLocalDay(p.rendido_at))}</Td>
                     <Td style={{ textAlign: "right" }}>
                       <button
                         type="button"
                         className="btn btn-ghost"
                         style={{ padding: "0.25rem 0.6rem", fontSize: "0.75rem" }}
-                        disabled={isPending}
+                        disabled={trabajando}
                         onClick={() => marcar([p.id], false)}
                         title="Volver a pendientes"
                       >
@@ -345,13 +537,27 @@ export default function RendicionTable({
 function PaymentRow({ p, selected, onToggle }: { p: Row; selected: boolean; onToggle: () => void }) {
   const ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
   const hasReceipt = (p.receipts?.length ?? 0) > 0;
+  const rendible = p.status === "paid";
   return (
     <tr
-      style={{ borderBottom: "1px solid var(--glass-border)", background: selected ? "rgba(47,169,255,0.07)" : undefined, cursor: "pointer" }}
-      onClick={onToggle}
+      style={{
+        borderBottom: "1px solid var(--glass-border)",
+        background: selected ? "rgba(47,169,255,0.07)" : undefined,
+        cursor: rendible ? "pointer" : "default",
+        opacity: rendible ? 1 : 0.55,
+      }}
+      onClick={rendible ? onToggle : undefined}
+      title={rendible ? undefined : "Solo se rinden los pagos confirmados"}
     >
       <Td>
-        <input type="checkbox" checked={selected} onChange={onToggle} onClick={(e) => e.stopPropagation()} style={{ accentColor: "#2fa9ff" }} />
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={onToggle}
+          onClick={(e) => e.stopPropagation()}
+          disabled={!rendible}
+          style={{ accentColor: "#2fa9ff" }}
+        />
       </Td>
       <Td muted>{formatDate(p.payment_date)}</Td>
       <Td>
@@ -369,7 +575,9 @@ function PaymentRow({ p, selected, onToggle }: { p: Row; selected: boolean; onTo
         {p.receipt_number && <div style={{ fontSize: "0.72rem", color: "var(--text-faint)" }}>{p.receipt_number}</div>}
       </Td>
       <Td style={{ textAlign: "right", fontWeight: 600 }}>{formatMoney(p.amount, p.currency)}</Td>
-      <Td muted style={{ textAlign: "right" }}>{formatMoney(ars, "ARS")}</Td>
+      <Td muted style={{ textAlign: "right" }}>
+        {ars == null ? <span style={{ color: "#fbbf24" }}>sin cotización</span> : formatMoney(ars, "ARS")}
+      </Td>
       <Td><PaymentStatusBadge status={p.status} /></Td>
       <Td style={{ textAlign: "center" }}>
         <span title={hasReceipt ? "Con recibo adjunto" : "Sin recibo"} style={{ color: hasReceipt ? "#6ee7b7" : "var(--text-faint)" }}>

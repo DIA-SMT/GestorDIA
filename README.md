@@ -22,11 +22,26 @@ adjuntar recibos y ver próximas renovaciones.
 |--------------|-----------|
 | `profiles`   | Usuarios del equipo (extiende `auth.users`). |
 | `categories` | Categorías para discriminar (IA, Hosting, Dominios…). |
-| `services`   | La suscripción/servicio: ciclo, monto esperado, estado, próxima renovación. |
-| `payments`   | Cada pago concreto: monto, moneda, cotización, equivalente en ARS, fecha, link, estado, recibos. |
+| `services`   | La suscripción/servicio: ciclo, monto esperado, estado, día de cobro y **ancla** del próximo ciclo sin confirmar. |
+| `payments`   | Cada pago concreto: monto, moneda, cotización, equivalente en ARS, fecha, link, estado, recibos, y el `cycle_date` si nació de un cargo recurrente. |
 | `receipts`   | Comprobantes subidos a Supabase Storage, linkeados al pago. |
+| `service_cycle_skips` | Ciclos omitidos a propósito (para saber por qué un mes no generó gasto). |
 
 Un **servicio** agrupa muchos **pagos** en el tiempo. Los pagos sueltos van sin servicio.
+
+### Cómo funcionan los cargos recurrentes
+
+`services.next_renewal_date` es una **marca de agua**: es el primer ciclo que
+todavía nadie confirmó. Todo lo anterior ya está resuelto.
+
+- Los cargos pendientes **no se guardan**: se derivan de esa fecha + el ciclo.
+  Nada se crea solo, ni siquiera al abrir la app.
+- **Confirmar** crea el pago con la **fecha del ciclo** (no la de hoy) y corre el
+  ancla un ciclo. Un `unique (service_id, cycle_date)` impide confirmarlo dos veces.
+- `billing_anchor_day` guarda el día real de cobro. Sin esa columna, un servicio
+  que cobra el 31 quedaría fijado al 28 después de pasar por febrero.
+- Un cargo por confirmar **no es un pago**: no suma en los totales ni entra en la
+  rendición hasta que se confirma.
 
 ---
 
@@ -49,10 +64,17 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=tu-anon-key
 ```
 
 ### 3. Aplicar el esquema de base de datos
-Abrí el **SQL Editor** en el dashboard de Supabase, pegá el contenido de
-[`supabase/migrations/0001_init.sql`](supabase/migrations/0001_init.sql) y ejecutá.
-Eso crea las tablas, las políticas de seguridad (RLS), el bucket de recibos y
-unas categorías iniciales.
+Abrí el **SQL Editor** en el dashboard de Supabase y ejecutá **en orden** el
+contenido de cada archivo de [`supabase/migrations/`](supabase/migrations/):
+
+1. [`0001_init.sql`](supabase/migrations/0001_init.sql) — tablas, RLS, bucket de recibos y categorías iniciales.
+2. [`0002_on_demand.sql`](supabase/migrations/0002_on_demand.sql) — ciclo "recarga a demanda".
+3. [`0003_rendido.sql`](supabase/migrations/0003_rendido.sql) — marca de rendición.
+4. [`0004_cargos_recurrentes.sql`](supabase/migrations/0004_cargos_recurrentes.sql) — cargos recurrentes por confirmar.
+
+Todas son idempotentes: se pueden volver a correr sin romper nada. Si te falta la
+0004, la app avisa arriba de los cargos y funciona en modo degradado (un solo
+ciclo por servicio, sin protección contra doble confirmación).
 
 ### 4. Instalar y correr
 
@@ -78,6 +100,12 @@ y contraseña (Supabase Auth). Cada persona del equipo se crea su cuenta.
 
 ## Funcionalidades
 
+- **Cargos recurrentes por confirmar**: cuando un servicio mensual/anual vuelve a
+  renovar, el gasto aparece propuesto en el dashboard esperando el OK. Confirmalo
+  (crea el pago del período, heredando proveedor, CUIT, comprobante y cotización del
+  pago anterior), omitilo, o dá el servicio de baja si ya no se usa. Un anual se
+  propone una vez al año; uno mensual, una vez por mes. Si quedaron meses atrasados
+  se proponen todos, cada uno con su fecha, y hay un "poner al día" para saltearlos.
 - **Dashboard** con gasto del mes (ARS y USD), servicios activos y próximas renovaciones.
 - **Pagos**: alta con monto + moneda + cotización, cálculo automático del equivalente
   en pesos, link de donde se pagó, estado, medio de pago, notas y **recibos adjuntos**.
@@ -85,17 +113,26 @@ y contraseña (Supabase Auth). Cada persona del equipo se crea su cuenta.
 - **Servicios/suscripciones**: ciclo de facturación, próxima renovación, estado
   (activa/pausada/cancelada), historial de pagos por servicio.
 - **Rendición de cuentas**: por cada pago se guarda **proveedor, CUIT, tipo y número
-  de comprobante**. La vista **Rendición** arma el detalle por período (mes), con
-  totales y **exportación a CSV** lista para pasarle al contador, junto con los recibos.
+  de comprobante**. La vista **Rendición** arma el detalle del mes con totales.
+  El botón **"PDF para imprimir y rendir"** genera el PDF (con los recibos
+  incrustados) y deja esos pagos marcados como presentados, con una barra de
+  **deshacer** y un **reimprimir** para cuando el contador lo vuelve a pedir. Hay
+  también una **vista previa que no marca nada** y exportación a CSV.
+  Solo se rinden los pagos en estado *Pagado*: los pendientes o fallidos quedan
+  afuera y vuelven a aparecer cuando se confirmen.
 - **Categorías**: crear/editar/borrar con color.
 - **Filtros** en el listado de pagos (búsqueda, categoría, estado, moneda).
 - **Recibos privados** en Supabase Storage con URLs firmadas temporales.
-- **Diseño "liquid"**: fondo animado, glassmorphism y tipografía moderna (Space Grotesk + Inter).
+- **Sidebar colapsable**: navegación lateral con badge de cargos por confirmar. El
+  estado colapsado se recuerda (localStorage, aplicado antes del primer pintado para
+  que no parpadee) y en mobile pasa a ser un cajón con overlay, Escape y foco.
+- **Diseño "liquid"**: fondo animado, glassmorphism y tipografía moderna.
 
 ---
 
 ## Ideas para las próximas versiones
 
+- Mandarle el PDF al contador por email desde la app (hoy es descarga manual).
 - Avisos por email antes de cada renovación (Supabase cron / Edge Functions).
 - Reportes: gasto por mes y por categoría con gráficos.
 - Exportar a CSV/Excel para conciliar con el resumen de la tarjeta.
