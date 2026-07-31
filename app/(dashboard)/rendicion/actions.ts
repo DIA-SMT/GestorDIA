@@ -3,10 +3,16 @@
 import { revalidatePath } from "next/cache";
 import { setPaymentsRendido, getReceiptUrls } from "@/lib/data";
 
-// Marca o desmarca pagos como rendidos y refresca la página
-export async function marcarRendidos(ids: string[], rendido: boolean): Promise<{ error?: string }> {
+// Marca o desmarca pagos como rendidos y refresca las vistas que dependen de eso
+// (la rendición, y el dashboard, que cuenta pendientes y cargos por confirmar).
+export async function marcarRendidos(
+  ids: string[],
+  rendido: boolean
+): Promise<{ error?: string; updated: number }> {
   const result = await setPaymentsRendido(ids, rendido);
   revalidatePath("/rendicion");
+  revalidatePath("/");
+  revalidatePath("/pagos");
   return result;
 }
 

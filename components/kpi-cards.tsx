@@ -32,7 +32,9 @@ export default function KpiCards({ kpis }: { kpis: KpiDef[] }) {
 
   return (
     <div style={{ display: "grid", gap: "1rem" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1.25rem" }}>
+      {/* minmax bajo a propósito: con el sidebar abierto hay ~1000px útiles y
+          los KPIs tienen que seguir entrando sin romper a una sola columna */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(196px, 1fr))", gap: "1rem" }}>
         {kpis.map((k) => {
           const isOpen = open === k.key;
           return (
@@ -56,7 +58,7 @@ export default function KpiCards({ kpis }: { kpis: KpiDef[] }) {
                   ▼
                 </span>
               </div>
-              <div style={{ fontSize: "1.6rem", fontWeight: 700, marginTop: "0.3rem", color: "var(--text)" }}>{k.value}</div>
+              <div style={{ fontSize: "1.45rem", fontWeight: 700, marginTop: "0.3rem", color: "var(--text)" }}>{k.value}</div>
               {k.hint && <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>{k.hint}</div>}
             </button>
           );

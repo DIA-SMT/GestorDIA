@@ -54,7 +54,14 @@ export interface Service {
   currency: CurrencyCode;
   status: ServiceStatus;
   payment_mode: PaymentMode;
+  // Ancla de facturación: el primer ciclo que TODAVÍA NADIE confirmó.
+  // Solo la mueven acciones explícitas (confirmar, omitir, poner al día,
+  // editar el servicio). Nunca se adelanta sola por mostrarla en pantalla.
   next_renewal_date: string | null;
+  // Día real de cobro (1-31). Existe aparte porque next_renewal_date se recorta
+  // en los meses cortos (el 31 pasa a 28 en febrero) y sin esto el servicio
+  // perdería su día para siempre. Opcional: null si no corrieron la migración 0004.
+  billing_anchor_day?: number | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -82,6 +89,9 @@ export interface Payment {
   paid_by: string | null;
   notes: string | null;
   rendido_at?: string | null; // cuándo se rindió al contador (null = pendiente)
+  // Ciclo que cubre este pago (solo si nació de un cargo recurrente confirmado).
+  // Un índice único (service_id, cycle_date) impide confirmar dos veces el mismo mes.
+  cycle_date?: string | null;
   created_at: string;
   updated_at: string;
   service?: Service | null;

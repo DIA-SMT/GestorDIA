@@ -1,18 +1,24 @@
 import Link from "next/link";
 import { monthPaidPayments, listServices, recentPayments as fetchRecent } from "@/lib/data";
-import { formatMoney, formatDate, daysUntil, effectiveRenewal, toARS } from "@/lib/utils";
+import { loadPendingCharges } from "@/lib/pending";
+import { formatMoney, formatDate, daysUntil, effectiveRenewal, toARS, todayISO, anchorDayOf } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import KpiCards, { type KpiDef } from "@/components/kpi-cards";
+import PendingCharges from "@/components/pending-charges";
 import { BILLING_CYCLE_LABELS, type Payment, type Service } from "@/lib/types";
 
-export default async function DashboardPage() {
-  const now = new Date();
-  const monthStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+// Lo que se muestra depende de qué día es hoy (cargos vencidos, alertas). Sin
+// esto Next puede prerenderizar la página en el build con un "hoy" congelado.
+export const dynamic = "force-dynamic";
 
-  const [monthPayments, allServices, recentPayments] = await Promise.all([
+export default async function DashboardPage() {
+  const monthStart = `${todayISO().slice(0, 7)}-01`;
+
+  const [monthPayments, allServices, recentPayments, pending] = await Promise.all([
     monthPaidPayments(monthStart),
     listServices(),
     fetchRecent(8),
+    loadPendingCharges(),
   ]);
 
   const activeServices = allServices.filter(
@@ -32,11 +38,13 @@ export default async function DashboardPage() {
   // manual = lo tenés que pagar vos (alerta, incluye vencidos) /
   // automatic = se debita solo (informativo, usa el próximo cobro futuro)
   const withRenewal = activeServices.map((s) => {
-    const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+    const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
     return { s, date, d: date == null ? null : daysUntil(date) };
   });
+  // Solo los que TODAVÍA no vencieron: los vencidos ya aparecen arriba como
+  // cargos por confirmar, y ahí sí se pueden resolver de una.
   const toPayManually = withRenewal.filter(
-    (r) => r.s.payment_mode === "manual" && r.d != null && r.d <= 30
+    (r) => r.s.payment_mode === "manual" && r.d != null && r.d > 0 && r.d <= 30
   );
   const autoDebit = withRenewal.filter(
     (r) => r.s.payment_mode !== "manual" && r.d != null && r.d >= 0 && r.d <= 30
@@ -50,6 +58,9 @@ export default async function DashboardPage() {
           + Registrar pago
         </Link>
       </div>
+
+      {/* Cargos recurrentes esperando el OK: lo primero que hay que resolver */}
+      <PendingCharges groups={pending.groups} migrado={pending.migrado} />
 
       {/* KPIs con detalle expandible para verificar los números */}
       <KpiCards
@@ -75,12 +86,30 @@ export default async function DashboardPage() {
             })),
           },
           {
+            key: "porconfirmar",
+            label: "Cargos por confirmar",
+            value: String(pending.total),
+            hint: "Renovaciones esperando tu OK",
+            accent: pending.total > 0,
+            note: "Servicios recurrentes que ya renovaron y todavía no generaron el gasto. Confirmalos arriba para que entren en la rendición del mes.",
+            rows: pending.groups
+              .flatMap((g) => g.charges)
+              .map((c) => ({
+                id: c.key,
+                href: `/servicios/${c.serviceId}`,
+                title: c.serviceName,
+                meta: `${c.periodo} · cobro del ${formatDate(c.cycleDate)}`,
+                amount: c.amount != null ? formatMoney(c.amount, c.currency) : "sin monto",
+                warn: c.amount == null || !!c.duplicate,
+              })),
+          },
+          {
             key: "manual",
             label: "Para pagar vos",
             value: String(toPayManually.length),
             hint: "Pagos manuales en 30 días",
             accent: toPayManually.length > 0,
-            note: "Servicios activos de pago manual que renuevan en los próximos 30 días (o ya vencieron).",
+            note: "Servicios activos de pago manual que renuevan en los próximos 30 días. Los que ya vencieron aparecen arriba como cargos por confirmar.",
             rows: toPayManually.map(({ s }) => serviceRow(s)),
           },
           {
@@ -236,7 +265,7 @@ function paymentRow(p: Payment) {
 
 // Fila de detalle de un servicio con renovación próxima
 function serviceRow(s: Service) {
-  const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+  const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
   const d = daysUntil(date);
   return {
     id: s.id,

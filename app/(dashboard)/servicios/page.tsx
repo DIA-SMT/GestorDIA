@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { listServices, servicePaidTotals } from "@/lib/data";
-import { formatMoney, formatDate, daysUntil, effectiveRenewal } from "@/lib/utils";
+import { formatMoney, formatDate, daysUntil, effectiveRenewal, anchorDayOf } from "@/lib/utils";
 import { ServiceStatusBadge, CategoryTag } from "@/components/badges";
 import { BILLING_CYCLE_LABELS } from "@/lib/types";
 
@@ -28,7 +28,7 @@ export default async function ServiciosPage() {
       ) : (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "1.25rem" }}>
           {services.map((s) => {
-            const renewalDate = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode);
+            const renewalDate = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
             const d = daysUntil(renewalDate);
             const spend = spendByService[s.id] ?? [];
             return (

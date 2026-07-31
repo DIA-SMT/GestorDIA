@@ -16,11 +16,28 @@ export const metadata: Metadata = {
     "Registro y seguimiento de pagos con tarjeta (credenciales, suscripciones, servicios) con soporte para rendición de cuentas. Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán.",
 };
 
+// Se corre ANTES del primer pintado: deja el sidebar en el estado que el
+// usuario eligió sin que se vea abrir y cerrar en cada navegación. Va inline
+// (y no con cookies) para no volver dinámico todo el segmento del dashboard.
+const SIDEBAR_INIT = `
+try {
+  if (localStorage.getItem('gestordia:sidebar') === 'collapsed') {
+    document.documentElement.dataset.sidebar = 'collapsed';
+  }
+} catch (e) {}
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // suppressHydrationWarning: el script de arriba agrega data-sidebar antes de
+  // que React hidrate, así que los atributos del <html> del server nunca van a
+  // coincidir con los del cliente. Solo afecta a este elemento.
   return (
-    <html lang="es" className={poppins.variable}>
+    <html lang="es" className={poppins.variable} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: SIDEBAR_INIT }} />
+      </head>
       <body>
         <LiquidBackground />
         {children}

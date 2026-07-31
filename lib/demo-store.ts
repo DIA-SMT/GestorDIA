@@ -4,11 +4,20 @@
 
 import type { Category, Payment, Receipt, Service } from "./types";
 
+export interface CycleSkip {
+  id: string;
+  service_id: string;
+  cycle_date: string;
+  reason: string | null;
+  created_at: string;
+}
+
 export interface DemoDB {
   categories: Category[];
   services: Service[];
   payments: Payment[];
   receipts: Receipt[];
+  skips: CycleSkip[];
 }
 
 function seed(): DemoDB {
@@ -57,6 +66,16 @@ function seed(): DemoDB {
       url: "https://figma.com", category_id: "cat-design",
       billing_cycle: "monthly", expected_amount: 12, currency: "USD",
       status: "cancelled", payment_mode: "automatic", next_renewal_date: null,
+      created_by: null, created_at: t, updated_at: t,
+    },
+    {
+      // Cobra el 31: sirve para ver que el ciclo NO se corre de día al pasar
+      // por un mes corto (31/05 -> 30/06 -> 31/07, no 01/07 -> 01/08).
+      id: "srv-claude", name: "Claude Pro", description: "Suscripción del equipo",
+      url: "https://claude.ai", category_id: "cat-ia",
+      billing_cycle: "monthly", expected_amount: 25, currency: "USD",
+      status: "active", payment_mode: "automatic", next_renewal_date: "2026-05-31",
+      billing_anchor_day: 31,
       created_by: null, created_at: t, updated_at: t,
     },
   ];
@@ -125,13 +144,22 @@ function seed(): DemoDB {
     },
   ];
 
-  return { categories, services, payments, receipts: [] };
+  return { categories, services, payments, receipts: [], skips: [] };
 }
 
 export function demoDb(): DemoDB {
   const g = globalThis as unknown as { __gestorDemoDB?: DemoDB };
   if (!g.__gestorDemoDB) g.__gestorDemoDB = seed();
-  return g.__gestorDemoDB;
+  // El store sobrevive al hot-reload, así que puede haber quedado uno creado
+  // por una versión anterior del código, sin las colecciones nuevas. Se
+  // normaliza en cada acceso para no explotar con "cannot read of undefined".
+  const db = g.__gestorDemoDB;
+  db.categories ??= [];
+  db.services ??= [];
+  db.payments ??= [];
+  db.receipts ??= [];
+  db.skips ??= [];
+  return db;
 }
 
 export function newId(prefix: string): string {

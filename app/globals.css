@@ -356,6 +356,222 @@ a.card:hover {
   to { opacity: 1; transform: none; }
 }
 
+/* ---------- Shell con sidebar colapsable ---------- */
+:root {
+  --sidebar-w: 248px;
+  --sidebar-w-collapsed: 74px;
+  --mobile-bar-h: 52px;
+}
+
+/* La primera columna la dimensiona el propio <aside> (por eso `auto`), y el
+   ancho se declara dos veces en reglas distintas (acá y en la regla
+   [data-sidebar="collapsed"] de abajo). Es a propósito: si el ancho saliera de
+   una custom property que cambia en <html>, la transición no se dispararía
+   —las transiciones reaccionan a que cambie la declaración que gana, no a que
+   cambie el valor de una variable heredada—. */
+.app-shell {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  width: var(--sidebar-w);
+  transition: width 0.18s ease;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1rem 0.7rem;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Superficie casi opaca a propósito: un backdrop-filter sobre un aside de
+     alto completo obliga al compositor a reprocesar toda esa área encima del
+     fondo animado. Mismo criterio que .assistant-panel. */
+  background: #0a0d18;
+  border-right: 1px solid var(--glass-border);
+  z-index: 30;
+}
+
+.sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 0.7rem;
+  border-radius: 11px;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.sidebar-link:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+}
+.sidebar-link[aria-current="page"] {
+  background: var(--glass-strong);
+  border-color: var(--glass-border);
+  color: var(--text);
+}
+.sidebar-link .icon {
+  flex: 0 0 22px;
+  display: grid;
+  place-items: center;
+}
+
+html[data-sidebar="collapsed"] .sidebar {
+  width: var(--sidebar-w-collapsed);
+}
+
+/* Colapsado: se ocultan los textos pero siguen siendo legibles por lectores de
+   pantalla (por eso se recorta, no display:none). */
+html[data-sidebar="collapsed"] .sidebar-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+html[data-sidebar="collapsed"] .sidebar-link {
+  justify-content: center;
+  padding-inline: 0;
+}
+.sidebar-badge {
+  margin-left: auto;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(47, 169, 255, 0.2);
+  color: #8ecbff;
+  font-size: 0.72rem;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+html[data-sidebar="collapsed"] .sidebar-badge {
+  position: absolute;
+  top: 2px;
+  right: 8px;
+  margin: 0;
+}
+
+.sidebar-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 0.45rem;
+  border-radius: 10px;
+  border: 1px solid var(--glass-border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.sidebar-toggle:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+}
+
+.sidebar-overlay {
+  display: none;
+}
+.mobile-bar {
+  display: none;
+}
+
+/* ---------- Mobile: el sidebar pasa a ser un cajón sobre el contenido ------- */
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  /* Fija, no sticky: la barra es un item del grid, y ahí `sticky` no pega
+     porque su área de desplazamiento es su propia fila. Al sacarla del flujo
+     hay que compensar con padding arriba del shell. */
+  .app-shell {
+    padding-top: var(--mobile-bar-h);
+  }
+  .mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.7rem;
+    padding: 0.6rem 1rem;
+    height: var(--mobile-bar-h);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 25;
+    background: rgba(8, 11, 24, 0.92);
+    border-bottom: 1px solid var(--glass-border);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+  }
+  .sidebar {
+    /* El transform va sobre el PROPIO cajón. Si se aplicara al contenedor del
+       contenido, ese contenedor pasaría a ser el bloque contenedor de todo lo
+       position:fixed que cuelga adentro y rompería el asistente flotante. */
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(280px, 82vw);
+    transform: translateX(-100%);
+    transition: transform 0.22s ease;
+    z-index: 60;
+    box-shadow: 0 0 60px rgba(0, 0, 0, 0.6);
+  }
+  .sidebar[data-open="true"] {
+    transform: none;
+  }
+  /* En mobile el cajón siempre se ve completo, aunque esté "colapsado" */
+  html[data-sidebar="collapsed"] .sidebar-label {
+    position: static;
+    width: auto;
+    height: auto;
+    clip-path: none;
+  }
+  html[data-sidebar="collapsed"] .sidebar-link {
+    justify-content: flex-start;
+    padding-inline: 0.7rem;
+  }
+  html[data-sidebar="collapsed"] .sidebar-badge {
+    position: static;
+    margin-left: auto;
+  }
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(0, 0, 0, 0.55);
+    border: 0;
+    padding: 0;
+  }
+  /* Colapsar no tiene sentido en el cajón: se abre o se cierra */
+  .sidebar-only-desktop {
+    display: none;
+  }
+  /* El panel del asistente no puede treparse por encima de la barra fija */
+  .assistant-panel {
+    max-height: calc(100dvh - 8rem - var(--mobile-bar-h));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar {
+    transition: none;
+  }
+}
+
 /* ---------- Utilidades ---------- */
 .section-title {
   font-size: 1.05rem;

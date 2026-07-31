@@ -3,6 +3,11 @@
 // Si los pagos tienen recibos/facturas cargados, se incrustan en el mismo PDF
 // (imágenes en el hueco libre bajo la tabla; PDFs como páginas anexas) con
 // pdf-lib, para dejar un único archivo autocontenido.
+//
+// ESTE MÓDULO ES PURO: arma y descarga el archivo, nunca escribe en la base.
+// El marcado como "rendido" lo hace quien lo llama — si no, la herramienta
+// `generar_rendicion` del asistente, que promete explícitamente NO marcar nada,
+// estaría marcando por la ventana.
 
 export interface RendicionReceiptFile {
   file_name: string;
@@ -24,71 +29,148 @@ export interface RendicionPdfRow {
   receipts?: RendicionReceiptFile[]; // archivos adjuntos a incrustar
 }
 
+export interface RendicionPdfResult {
+  ok: boolean;
+  filas: number;
+  /** Archivos efectivamente incrustados en el PDF */
+  incrustados: number;
+  /** Archivos que estaban adjuntos pero no se pudieron traer/incrustar */
+  fallidos: number;
+  error?: string;
+}
+
+type Kind = "pdf" | "png" | "jpg" | "other";
+
+interface FetchedFile {
+  file: RendicionReceiptFile;
+  kind: Kind;
+  bytes: ArrayBuffer | null; // null = no se pudo traer
+}
+
 export async function downloadRendicionPdf(opts: {
   title: string;
   rows: RendicionPdfRow[];
   totalARS: number;
   totalUSD: number;
   filename: string;
-}) {
-  const { jsPDF } = await import("jspdf");
-  const autoTable = (await import("jspdf-autotable")).default;
+}): Promise<RendicionPdfResult> {
+  try {
+    // 1) Primero se traen TODOS los adjuntos, antes de dibujar nada. Así la
+    //    columna "Recibo" de la tabla dice lo que realmente entró en el PDF y
+    //    no lo que estaba adjunto en la base (que es lo que hacía antes: podía
+    //    imprimir "Sí" en 12 filas sin un solo archivo incrustado).
+    const traidos: FetchedFile[][] = await Promise.all(
+      opts.rows.map((r) =>
+        Promise.all(
+          (r.receipts ?? []).map(async (f): Promise<FetchedFile> => {
+            const kind = fileKind(f);
+            if (!f.url) return { file: f, kind, bytes: null };
+            try {
+              const res = await fetch(f.url);
+              if (!res.ok) return { file: f, kind, bytes: null };
+              return { file: f, kind, bytes: await res.arrayBuffer() };
+            } catch {
+              return { file: f, kind, bytes: null };
+            }
+          })
+        )
+      )
+    );
 
-  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
-  doc.setFontSize(15);
-  doc.setTextColor(20);
-  doc.text(opts.title, 40, 42);
-  doc.setFontSize(9);
-  doc.setTextColor(110);
-  doc.text(
-    `Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán — ${opts.rows.length} pagos`,
-    40,
-    58
-  );
+    const okDe = (i: number) => traidos[i].filter((f) => f.bytes !== null).length;
+    const falloDe = (i: number) => traidos[i].filter((f) => f.bytes === null).length;
+    const incrustados = opts.rows.reduce((a, _r, i) => a + okDe(i), 0);
+    const fallidos = opts.rows.reduce((a, _r, i) => a + falloDe(i), 0);
 
-  autoTable(doc, {
-    startY: 74,
-    head: [["Fecha", "Proveedor", "CUIT", "Descripción", "Comprobante", "N°", "Moneda", "Monto", "En ARS", "Recibo"]],
-    body: opts.rows.map((r) => [
-      r.fecha,
-      r.proveedor || "—",
-      r.cuit,
-      r.descripcion || "—",
-      r.comprobante,
-      r.nro,
-      r.moneda,
-      r.monto.toFixed(2),
-      r.ars == null ? "—" : Math.round(r.ars).toLocaleString("es-AR"),
-      r.recibo ? "Sí" : "No",
-    ]),
-    styles: { fontSize: 8, cellPadding: 4 },
-    headStyles: { fillColor: [10, 102, 242], fontSize: 8 },
-    alternateRowStyles: { fillColor: [244, 248, 255] },
-    columnStyles: { 7: { halign: "right" }, 8: { halign: "right" }, 9: { halign: "center" } },
-  });
+    // 2) Tabla
+    const { jsPDF } = await import("jspdf");
+    const autoTable = (await import("jspdf-autotable")).default;
 
-  const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY;
-  doc.setFontSize(10);
-  doc.setTextColor(20);
-  const fmtARS = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS" });
-  const fmtUSD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
-  doc.text(
-    `Total equivalente en ARS: ${fmtARS.format(opts.totalARS)}   ·   Total USD: ${fmtUSD.format(opts.totalUSD)}`,
-    40,
-    finalY + 22
-  );
+    const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: "a4" });
+    doc.setFontSize(15);
+    doc.setTextColor(20);
+    doc.text(opts.title, 40, 42);
+    doc.setFontSize(9);
+    doc.setTextColor(110);
+    doc.text(
+      `Dirección de Inteligencia Artificial · Municipalidad de San Miguel de Tucumán — ${opts.rows.length} pagos confirmados`,
+      40,
+      58
+    );
 
-  // ¿Hay recibos para incrustar? Si no, guardamos el PDF simple y listo.
-  const conRecibos = opts.rows.filter((r) => (r.receipts ?? []).some((f) => f.url));
-  if (conRecibos.length === 0) {
-    doc.save(opts.filename);
-    return;
+    autoTable(doc, {
+      startY: 74,
+      head: [["Fecha", "Proveedor", "CUIT", "Descripción", "Comprobante", "N°", "Moneda", "Monto", "En ARS", "Recibo"]],
+      body: opts.rows.map((r, i) => [
+        r.fecha,
+        r.proveedor || "—",
+        r.cuit,
+        r.descripcion || "—",
+        r.comprobante,
+        r.nro,
+        r.moneda,
+        r.monto.toFixed(2),
+        r.ars == null ? "s/cotiz." : Math.round(r.ars).toLocaleString("es-AR"),
+        etiquetaRecibo(okDe(i), falloDe(i)),
+      ]),
+      styles: { fontSize: 8, cellPadding: 4 },
+      headStyles: { fillColor: [10, 102, 242], fontSize: 8 },
+      alternateRowStyles: { fillColor: [244, 248, 255] },
+      columnStyles: { 7: { halign: "right" }, 8: { halign: "right" }, 9: { halign: "center" } },
+    });
+
+    const finalY = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY;
+    doc.setFontSize(10);
+    doc.setTextColor(20);
+    const fmtARS = new Intl.NumberFormat("es-AR", { style: "currency", currency: "ARS" });
+    const fmtUSD = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" });
+    doc.text(
+      `Total equivalente en ARS: ${fmtARS.format(opts.totalARS)}   ·   Total USD: ${fmtUSD.format(opts.totalUSD)}`,
+      40,
+      finalY + 22
+    );
+
+    // Los pagos sin cotización no pueden convertirse: se aclara en el PDF para
+    // que el total no se lea como si fuera todo.
+    const sinCotiz = opts.rows.filter((r) => r.ars == null).length;
+    if (sinCotiz > 0) {
+      doc.setFontSize(8);
+      doc.setTextColor(150, 90, 0);
+      doc.text(
+        `Nota: ${sinCotiz} ${sinCotiz === 1 ? "pago no tiene" : "pagos no tienen"} cotización cargada y no ${
+          sinCotiz === 1 ? "está incluido" : "están incluidos"
+        } en el total en ARS.`,
+        40,
+        finalY + 36
+      );
+    }
+
+    // 3) Adjuntos
+    const hayAdjuntos = traidos.some((fs) => fs.some((f) => f.bytes !== null));
+    if (!hayAdjuntos) {
+      triggerDownload(new Blob([doc.output("arraybuffer")], { type: "application/pdf" }), opts.filename);
+      return { ok: true, filas: opts.rows.length, incrustados, fallidos };
+    }
+
+    const merged = await appendReceipts(doc.output("arraybuffer"), opts.rows, traidos, finalY + (sinCotiz > 0 ? 44 : 30));
+    triggerDownload(new Blob([merged as unknown as BlobPart], { type: "application/pdf" }), opts.filename);
+    return { ok: true, filas: opts.rows.length, incrustados, fallidos };
+  } catch (e) {
+    return {
+      ok: false,
+      filas: opts.rows.length,
+      incrustados: 0,
+      fallidos: 0,
+      error: e instanceof Error ? e.message : "No se pudo generar el PDF.",
+    };
   }
+}
 
-  const baseBytes = doc.output("arraybuffer");
-  const merged = await appendReceipts(baseBytes, conRecibos, finalY + 30);
-  const blob = new Blob([merged as unknown as BlobPart], { type: "application/pdf" });
-  triggerDownload(blob, opts.filename);
+function etiquetaRecibo(ok: number, fallo: number): string {
+  if (ok === 0 && fallo === 0) return "No";
+  if (fallo === 0) return ok === 1 ? "Sí" : `Sí (${ok})`;
+  if (ok === 0) return "Error";
+  return `${ok} de ${ok + fallo}`;
 }
 
 // ---------- Incrustado de recibos con pdf-lib ----------
@@ -98,6 +180,7 @@ export async function downloadRendicionPdf(opts: {
 async function appendReceipts(
   baseBytes: ArrayBuffer,
   rows: RendicionPdfRow[],
+  traidos: FetchedFile[][],
   tableEndY: number // dónde termina la tabla+totales, en coord. jsPDF (origen arriba)
 ): Promise<Uint8Array> {
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
@@ -130,14 +213,12 @@ async function appendReceipts(
     cursorY = size.height - MARGIN;
   };
 
-  // Barra superior (para páginas de PDFs incrustados o avisos, sobre fondo propio)
   const drawBar = (pg: import("pdf-lib").PDFPage, text: string) => {
     const { width, height } = pg.getSize();
     pg.drawRectangle({ x: 0, y: height - BAR, width, height: BAR, color: brand });
     pg.drawText(fit(text, font, 9, width - 24), { x: 12, y: height - BAR + 6, size: 9, font, color: rgb(1, 1, 1) });
   };
 
-  // Título de un recibo-imagen apilado en el hueco (texto simple, sin barra)
   const drawCaption = (text: string) => {
     page.drawText(fit("Recibo — " + text, fontBold, 10, size.width - MARGIN * 2), {
       x: MARGIN,
@@ -149,7 +230,6 @@ async function appendReceipts(
     cursorY -= CAPTION_H;
   };
 
-  // Coloca una imagen apilada bajo el cursor; salta de página si no entra
   const placeImage = (caption: string, img: import("pdf-lib").PDFImage) => {
     if (cursorY - MARGIN < MIN_BLOCK) newPage();
     drawCaption(caption);
@@ -162,7 +242,7 @@ async function appendReceipts(
     cursorY -= h + GAP;
   };
 
-  // Página informativa para archivos que no se pueden incrustar (o que fallaron)
+  // Página informativa para archivos que no se pueden incrustar
   const drawNotice = (title: string, f: RendicionReceiptFile) => {
     const pg = merged.addPage([size.width, size.height]);
     drawBar(pg, title);
@@ -177,35 +257,29 @@ async function appendReceipts(
     cursorY = -1; // la próxima imagen arranca en página nueva
   };
 
-  for (const r of rows) {
+  for (const [i, r] of rows.entries()) {
     const caption = captionOf(r);
-    for (const f of r.receipts ?? []) {
-      if (!f.url) continue;
-      const kind = fileKind(f);
+    for (const f of traidos[i]) {
+      if (!f.bytes) continue; // no se pudo traer: ya quedó contado como fallido
       try {
-        const bytes = await (await fetch(f.url)).arrayBuffer();
-
-        if (kind === "pdf") {
-          // Un PDF es página(s) entera(s): se anexa aparte, no en el hueco.
-          const src = await PDFDocument.load(bytes);
+        if (f.kind === "pdf") {
+          const src = await PDFDocument.load(f.bytes);
           const pages = await merged.copyPages(src, src.getPageIndices());
-          pages.forEach((pg, i) => {
+          pages.forEach((pg, k) => {
             merged.addPage(pg);
-            if (i === 0) drawBar(pg, `Recibo — ${caption}`);
+            if (k === 0) drawBar(pg, `Recibo — ${caption}`);
           });
-          cursorY = -1; // la próxima imagen arranca en página nueva
+          cursorY = -1;
           continue;
         }
-
-        if (kind === "png" || kind === "jpg") {
-          const img = kind === "png" ? await merged.embedPng(bytes) : await merged.embedJpg(bytes);
+        if (f.kind === "png" || f.kind === "jpg") {
+          const img = f.kind === "png" ? await merged.embedPng(f.bytes) : await merged.embedJpg(f.bytes);
           placeImage(caption, img);
           continue;
         }
-
-        drawNotice(`Recibo — ${caption}`, f);
+        drawNotice(`Recibo — ${caption}`, f.file);
       } catch {
-        drawNotice(`Recibo (no se pudo cargar) — ${caption}`, f);
+        drawNotice(`Recibo (no se pudo incrustar) — ${caption}`, f.file);
       }
     }
   }
@@ -213,7 +287,7 @@ async function appendReceipts(
   return merged.save();
 }
 
-function fileKind(f: RendicionReceiptFile): "pdf" | "png" | "jpg" | "other" {
+function fileKind(f: RendicionReceiptFile): Kind {
   const mime = (f.mime_type ?? "").toLowerCase();
   const name = f.file_name.toLowerCase();
   if (mime.includes("pdf") || name.endsWith(".pdf")) return "pdf";
@@ -230,11 +304,19 @@ function fit(text: string, font: import("pdf-lib").PDFFont, size: number, maxWid
   return s + "…";
 }
 
-function triggerDownload(blob: Blob, filename: string) {
+/**
+ * Dispara la descarga de un blob.
+ * El <a> TIENE que estar en el DOM y la URL no se puede revocar en la misma
+ * vuelta del event loop: hacerlo aborta la descarga en Firefox y Safari.
+ */
+export function triggerDownload(blob: Blob, filename: string) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

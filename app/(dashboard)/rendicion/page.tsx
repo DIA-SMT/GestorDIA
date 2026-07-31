@@ -1,6 +1,8 @@
 import { listPaymentsBetween, listCategories } from "@/lib/data";
-import { formatMoney, toARS } from "@/lib/utils";
+import { loadPendingCharges } from "@/lib/pending";
+import { formatMoney, toARS, todayISO } from "@/lib/utils";
 import RendicionTable from "@/components/rendicion-table";
+import PendingCharges from "@/components/pending-charges";
 import type { Payment } from "@/lib/types";
 
 function nextMonth(mes: string): string {
@@ -20,24 +22,31 @@ export default async function RendicionPage({
   searchParams: Promise<{ mes?: string }>;
 }) {
   const sp = await searchParams;
-  const now = new Date();
-  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const currentMonth = todayISO().slice(0, 7);
   const mes = /^\d{4}-\d{2}$/.test(sp.mes ?? "") ? sp.mes! : currentMonth;
 
   const start = `${mes}-01`;
   const end = `${nextMonth(mes)}-01`;
 
-  const [payments, categories] = await Promise.all([
+  const [payments, categories, pending] = await Promise.all([
     listPaymentsBetween(start, end),
     listCategories(),
+    loadPendingCharges(),
   ]);
   const rows = payments as (Payment & { receipts?: { id: string }[] })[];
 
   const paid = rows.filter((p) => p.status === "paid");
   const totalARS = paid.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
   const totalUSD = paid.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
-  const pendientes = rows.filter((p) => !p.rendido_at).length;
+  // Solo los confirmados se pueden rendir: un pago pendiente o fallido no cuenta
+  const pendientes = paid.filter((p) => !p.rendido_at).length;
   const conRecibo = rows.filter((p) => (p.receipts?.length ?? 0) > 0).length;
+
+  // Cargos recurrentes de ESTE mes que todavía no se confirmaron: si se rinde
+  // sin resolverlos, el mes le llega incompleto al contador.
+  const delMes = pending.groups
+    .map((g) => ({ ...g, charges: g.charges.filter((c) => c.cycleDate.slice(0, 7) === mes) }))
+    .filter((g) => g.charges.length > 0);
 
   return (
     <div style={{ display: "grid", gap: "2rem" }}>
@@ -58,18 +67,33 @@ export default async function RendicionPage({
       </div>
 
       {/* Totales */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "1.25rem" }}>
-        <Kpi label="Total del período (ARS)" value={formatMoney(totalARS, "ARS")} hint={`${paid.length} pagos confirmados`} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(196px, 1fr))", gap: "1rem" }}>
+        <Kpi
+          label="Total del período (ARS)"
+          value={formatMoney(totalARS, "ARS")}
+          hint={`${paid.length} ${paid.length === 1 ? "pago confirmado" : "pagos confirmados"}`}
+        />
         <Kpi label="Total en USD" value={formatMoney(totalUSD, "USD")} hint="Pagos en dólares" />
-        <Kpi label="Pendientes de rendir" value={`${pendientes}/${rows.length}`} hint="Todavía no presentados" />
+        <Kpi label="Pendientes de rendir" value={`${pendientes}/${paid.length}`} hint="Confirmados sin presentar" />
         <Kpi label="Con recibo adjunto" value={`${conRecibo}/${rows.length}`} hint="Archivo cargado" />
       </div>
+
+      {/* Cargos del mes sin confirmar: resolverlos ANTES de armar el PDF */}
+      {delMes.length > 0 && (
+        <PendingCharges
+          groups={delMes}
+          migrado={pending.migrado}
+          titulo={`Falta confirmar de ${monthLabel(mes)}`}
+        />
+      )}
 
       <RendicionTable payments={rows} categories={categories} mes={mes} mesLabel={monthLabel(mes)} />
 
       <p className="muted" style={{ fontSize: "0.8rem" }}>
-        Consejo: filtrá o seleccioná los pagos que te pida el contador, exportalos en CSV o PDF
-        y marcalos como rendidos para llevar el control de lo ya presentado.
+        Circuito: confirmá los cargos recurrentes del mes → revisá la lista → apretá
+        <strong style={{ color: "var(--text)" }}> “PDF para imprimir y rendir”</strong>. El PDF baja con
+        los recibos incrustados y esos pagos quedan marcados como presentados. Si querés mirarlo antes
+        sin cerrar nada, usá la vista previa.
       </p>
     </div>
   );

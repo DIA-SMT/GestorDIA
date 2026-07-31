@@ -445,19 +445,44 @@ export async function updatePayment(
   return {};
 }
 
-// Marca (o desmarca) pagos como rendidos al contador
-export async function setPaymentsRendido(ids: string[], rendido: boolean): Promise<{ error?: string }> {
-  if (ids.length === 0) return {};
+// Marca (o desmarca) pagos como rendidos al contador.
+// Devuelve cuántas filas cambiaron de verdad.
+//
+// - Al MARCAR solo toca los que están pendientes (`rendido_at is null`), así
+//   bajar el PDF dos veces no pisa la fecha real de la primera presentación.
+// - Se manda de a tandas: un `.in()` con 300 ids se pasa del largo de URL que
+//   acepta PostgREST.
+export async function setPaymentsRendido(
+  ids: string[],
+  rendido: boolean
+): Promise<{ error?: string; updated: number }> {
+  if (ids.length === 0) return { updated: 0 };
   const rendido_at = rendido ? nowIso() : null;
+
   if (IS_DEMO) {
+    let updated = 0;
     demoDb().payments.forEach((p) => {
-      if (ids.includes(p.id)) p.rendido_at = rendido_at;
+      if (!ids.includes(p.id)) return;
+      if (rendido && p.rendido_at) return; // ya rendido: no se pisa la fecha
+      if (!rendido && !p.rendido_at) return;
+      p.rendido_at = rendido_at;
+      updated++;
     });
-    return {};
+    return { updated };
   }
+
   const supabase = await sb();
-  const { error } = await supabase.from("payments").update({ rendido_at }).in("id", ids);
-  return { error: error?.message };
+  const CHUNK = 100;
+  let updated = 0;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const slice = ids.slice(i, i + CHUNK);
+    let q = supabase.from("payments").update({ rendido_at }).in("id", slice);
+    q = rendido ? q.is("rendido_at", null) : q.not("rendido_at", "is", null);
+    const { data, error } = await q.select("id");
+    if (error) return { error: error.message, updated };
+    updated += data?.length ?? 0;
+  }
+  return { updated };
 }
 
 export async function deletePayment(id: string): Promise<void> {
@@ -473,6 +498,281 @@ export async function deletePayment(id: string): Promise<void> {
     await supabase.storage.from("receipts").remove(receipts.map((r) => r.file_path));
   }
   await supabase.from("payments").delete().eq("id", id);
+}
+
+// ============================================================
+// CARGOS RECURRENTES
+// ============================================================
+// Ver lib/recurring.ts para el modelo. Acá va solo el acceso a datos.
+
+// ¿Está corrida la migración 0004? La app tiene que seguir funcionando si no,
+// así que se sondea una vez y se cachea 60 segundos: apenas el usuario corre el
+// SQL se auto-cura sin necesidad de redeploy.
+interface MigrationProbe {
+  value: boolean;
+  at: number;
+}
+const PROBE_TTL_MS = 60_000;
+
+export async function hasRecurrenceColumns(): Promise<boolean> {
+  if (IS_DEMO) return true;
+  const g = globalThis as unknown as { __gestorRecurrenceProbe?: MigrationProbe };
+  const cached = g.__gestorRecurrenceProbe;
+  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.value;
+
+  const supabase = await sb();
+  const { error } = await supabase.from("payments").select("cycle_date").limit(1);
+  if (!error) {
+    g.__gestorRecurrenceProbe = { value: true, at: Date.now() };
+    return true;
+  }
+
+  // Solo "no existe la columna/tabla" significa que falta la migración.
+  // Cualquier otro error (red caída, token vencido, RLS) es transitorio: si se
+  // tomara como "falta el SQL" se cachearía el modo degradado 60 segundos y el
+  // usuario vería el cartel amarillo con la migración ya corrida.
+  const falta = error.code === "42703" || error.code === "42P01" || /column .* does not exist/i.test(error.message);
+  if (falta) {
+    g.__gestorRecurrenceProbe = { value: false, at: Date.now() };
+    console.warn(
+      "[gestorDIA] Falta correr supabase/migrations/0004_cargos_recurrentes.sql:",
+      error.message
+    );
+    return false;
+  }
+
+  // Error transitorio: no se cachea nada y se asume migrado (el índice único
+  // de la base sigue siendo la última línea de defensa contra duplicados).
+  console.warn("[gestorDIA] No se pudo sondear el esquema:", error.message);
+  return true;
+}
+
+export interface RecurringContext {
+  confirmados: Set<string>;
+  omitidos: Set<string>;
+  pagosSueltos: { id: string; service_id: string; payment_date: string; amount: number; currency: CurrencyCode }[];
+  mesesRendidos: Set<string>;
+  /** false = falta la migración 0004; se trabaja en modo degradado */
+  migrado: boolean;
+}
+
+const cycleKey = (serviceId: string, cycleDate: string) => `${serviceId}|${cycleDate}`;
+
+export async function getRecurringContext(desde: string): Promise<RecurringContext> {
+  if (IS_DEMO) {
+    const db = demoDb();
+    const confirmados = new Set<string>();
+    const mesesRendidos = new Set<string>();
+    const pagosSueltos: RecurringContext["pagosSueltos"] = [];
+    for (const p of db.payments) {
+      if (p.service_id && p.cycle_date) confirmados.add(cycleKey(p.service_id, p.cycle_date));
+      if (p.rendido_at) mesesRendidos.add(p.payment_date.slice(0, 7));
+      if (p.service_id && !p.cycle_date && p.payment_date >= desde) {
+        pagosSueltos.push({
+          id: p.id,
+          service_id: p.service_id,
+          payment_date: p.payment_date,
+          amount: Number(p.amount),
+          currency: p.currency,
+        });
+      }
+    }
+    return {
+      confirmados,
+      omitidos: new Set(db.skips.map((s) => cycleKey(s.service_id, s.cycle_date))),
+      pagosSueltos,
+      mesesRendidos,
+      migrado: true,
+    };
+  }
+
+  const migrado = await hasRecurrenceColumns();
+  const supabase = await sb();
+
+  const [ciclos, sueltos, rendidos, skips] = await Promise.all([
+    migrado
+      ? supabase.from("payments").select("service_id, cycle_date").not("cycle_date", "is", null)
+      : Promise.resolve({ data: [] as { service_id: string | null; cycle_date: string | null }[] }),
+    migrado
+      ? supabase
+          .from("payments")
+          .select("id, service_id, payment_date, amount, currency")
+          .not("service_id", "is", null)
+          .is("cycle_date", null)
+          .gte("payment_date", desde)
+      : supabase
+          .from("payments")
+          .select("id, service_id, payment_date, amount, currency")
+          .not("service_id", "is", null)
+          .gte("payment_date", desde),
+    supabase.from("payments").select("payment_date").not("rendido_at", "is", null),
+    migrado
+      ? supabase.from("service_cycle_skips").select("service_id, cycle_date")
+      : Promise.resolve({ data: [] as { service_id: string; cycle_date: string }[] }),
+  ]);
+
+  const confirmados = new Set<string>();
+  for (const r of (ciclos.data ?? []) as { service_id: string | null; cycle_date: string | null }[]) {
+    if (r.service_id && r.cycle_date) confirmados.add(cycleKey(r.service_id, r.cycle_date));
+  }
+  const omitidos = new Set<string>();
+  for (const r of (skips.data ?? []) as { service_id: string; cycle_date: string }[]) {
+    omitidos.add(cycleKey(r.service_id, r.cycle_date));
+  }
+  const mesesRendidos = new Set<string>();
+  for (const r of (rendidos.data ?? []) as { payment_date: string }[]) {
+    mesesRendidos.add(r.payment_date.slice(0, 7));
+  }
+
+  return {
+    confirmados,
+    omitidos,
+    pagosSueltos: ((sueltos.data ?? []) as RecurringContext["pagosSueltos"]).map((p) => ({
+      ...p,
+      amount: Number(p.amount),
+    })),
+    mesesRendidos,
+    migrado,
+  };
+}
+
+// Último pago de un servicio: de ahí se heredan los datos de rendición
+// (proveedor, CUIT, tipo de comprobante, cotización) al confirmar un cargo,
+// para que la rendición no salga con el proveedor vacío.
+export async function lastPaymentForService(serviceId: string): Promise<Payment | null> {
+  if (IS_DEMO) {
+    const rows = demoDb()
+      .payments.filter((p) => p.service_id === serviceId)
+      .sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+    return rows[0] ?? null;
+  }
+  const supabase = await sb();
+  const { data } = await supabase
+    .from("payments")
+    .select("*")
+    .eq("service_id", serviceId)
+    .order("payment_date", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  return (data as Payment) ?? null;
+}
+
+/**
+ * Avanza el ancla de un servicio SOLO si sigue valiendo lo que esperábamos
+ * (compare-and-swap). Devuelve false si otro ya la movió: eso es lo que impide
+ * que dos pestañas confirmen el mismo ciclo dos veces.
+ */
+export async function advanceServiceRenewal(
+  id: string,
+  expected: string,
+  next: string | null
+): Promise<boolean> {
+  if (IS_DEMO) {
+    const s = demoDb().services.find((x) => x.id === id);
+    if (!s || s.next_renewal_date !== expected) return false;
+    s.next_renewal_date = next;
+    s.updated_at = nowIso();
+    return true;
+  }
+  const supabase = await sb();
+  const { data, error } = await supabase
+    .from("services")
+    .update({ next_renewal_date: next })
+    .eq("id", id)
+    .eq("next_renewal_date", expected)
+    .select("id");
+  return !error && (data?.length ?? 0) === 1;
+}
+
+/** Crea el pago de un ciclo confirmado. `cycle_date` es el árbitro de duplicados. */
+export async function createCyclePayment(
+  input: PaymentInput,
+  cycleDate: string,
+  userId: string | null
+): Promise<{ id?: string; error?: string; duplicate?: boolean }> {
+  if (IS_DEMO) {
+    const db = demoDb();
+    if (db.payments.some((p) => p.service_id === input.service_id && p.cycle_date === cycleDate)) {
+      return { duplicate: true, error: "Ese ciclo ya estaba confirmado." };
+    }
+    const id = newId("pay");
+    db.payments.push({
+      ...input,
+      id,
+      cycle_date: cycleDate,
+      paid_by: userId,
+      created_at: nowIso(),
+      updated_at: nowIso(),
+    });
+    return { id };
+  }
+
+  const migrado = await hasRecurrenceColumns();
+  const supabase = await sb();
+  const payload = migrado
+    ? { ...input, cycle_date: cycleDate, paid_by: userId }
+    : { ...input, paid_by: userId };
+  const { data, error } = await supabase.from("payments").insert(payload).select("id").single();
+
+  if (error) {
+    // 23505 = unique_violation contra payments_service_cycle_uniq
+    if (error.code === "23505") return { duplicate: true, error: "Ese ciclo ya estaba confirmado." };
+    return { error: error.message };
+  }
+  return { id: data.id };
+}
+
+/** Deja constancia de un ciclo omitido a propósito. */
+export async function recordCycleSkip(
+  serviceId: string,
+  cycleDate: string,
+  reason: string | null,
+  userId: string | null
+): Promise<void> {
+  if (IS_DEMO) {
+    const db = demoDb();
+    if (db.skips.some((s) => s.service_id === serviceId && s.cycle_date === cycleDate)) return;
+    db.skips.push({
+      id: newId("skip"),
+      service_id: serviceId,
+      cycle_date: cycleDate,
+      reason,
+      created_at: nowIso(),
+    });
+    return;
+  }
+  if (!(await hasRecurrenceColumns())) return; // sin migración solo se avanza el ancla
+  const supabase = await sb();
+  await supabase
+    .from("service_cycle_skips")
+    .upsert({ service_id: serviceId, cycle_date: cycleDate, reason, created_by: userId }, { onConflict: "service_id,cycle_date" });
+}
+
+/** Cambia el estado de un servicio (para "ya no lo usamos"). */
+export async function setServiceStatus(id: string, status: ServiceStatus): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const s = demoDb().services.find((x) => x.id === id);
+    if (s) {
+      s.status = status;
+      s.updated_at = nowIso();
+    }
+    return {};
+  }
+  const supabase = await sb();
+  const { error } = await supabase.from("services").update({ status }).eq("id", id);
+  return { error: error?.message };
+}
+
+/** Guarda el día real de cobro (columna de la migración 0004). */
+export async function setServiceAnchorDay(id: string, day: number | null): Promise<void> {
+  if (IS_DEMO) {
+    const s = demoDb().services.find((x) => x.id === id);
+    if (s) s.billing_anchor_day = day;
+    return;
+  }
+  if (!(await hasRecurrenceColumns())) return;
+  const supabase = await sb();
+  await supabase.from("services").update({ billing_anchor_day: day }).eq("id", id);
 }
 
 // ============================================================

@@ -419,20 +419,56 @@ function ActionCard({
                 Ver →
               </Link>
             )}
-            {done && item.pdf && (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
-                onClick={() => downloadRendicionPdf(item.pdf!)}
-              >
-                ⬇ Descargar PDF
-              </button>
-            )}
+            {done && item.pdf && <BotonPdf pdf={item.pdf} />}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+// Descarga del PDF de una rendición generada desde el chat. Muestra el
+// resultado: si falla al generarse, el usuario tiene que enterarse.
+function BotonPdf({ pdf }: { pdf: ActionPdf }) {
+  const [estado, setEstado] = useState<null | "armando" | "listo" | "error">(null);
+  const [detalle, setDetalle] = useState<string | null>(null);
+
+  async function bajar() {
+    setEstado("armando");
+    setDetalle(null);
+    const r = await downloadRendicionPdf(pdf);
+    if (!r.ok) {
+      setEstado("error");
+      setDetalle(r.error ?? "No se pudo generar el PDF.");
+      return;
+    }
+    setEstado("listo");
+    setDetalle(
+      r.fallidos > 0
+        ? `${r.fallidos} recibo(s) no se pudieron incrustar.`
+        : r.incrustados > 0
+        ? `${r.incrustados} recibo(s) incrustado(s).`
+        : null
+    );
+  }
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+      <button
+        type="button"
+        className="btn btn-ghost"
+        style={{ padding: "0.35rem 0.7rem", fontSize: "0.78rem" }}
+        onClick={bajar}
+        disabled={estado === "armando"}
+      >
+        {estado === "armando" ? "Armando PDF…" : estado === "listo" ? "⬇ Descargar de nuevo" : "⬇ Descargar PDF"}
+      </button>
+      {detalle && (
+        <span style={{ fontSize: "0.74rem", color: estado === "error" ? "#f87171" : "var(--text-muted)" }}>
+          {detalle}
+        </span>
+      )}
+    </span>
   );
 }
 
