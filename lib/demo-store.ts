@@ -117,6 +117,17 @@ function seed(): DemoDB {
       notes: null, ...base,
     },
     {
+      // Gasto de hace 3 meses sin repetir desde entonces: sirve para ver que la
+      // ventana de varios meses lo sigue mostrando (con uno solo desaparecía).
+      id: "pay-0", service_id: "srv-claude", category_id: "cat-ia",
+      description: "Claude Pro — Mayo 2026", amount: 25, currency: "USD",
+      exchange_rate: 1320, amount_ars: 33000, payment_date: "2026-05-31",
+      payment_url: null, status: "paid",
+      provider: "Anthropic PBC", provider_tax_id: null,
+      receipt_type: "comprobante_exterior", receipt_number: "AN-5510",
+      notes: null, ...base,
+    },
+    {
       id: "pay-6", service_id: null, category_id: "cat-tools",
       description: "Notion (pendiente de confirmar)", amount: 10, currency: "USD",
       exchange_rate: 1355, amount_ars: 13550, payment_date: "2026-07-12",
