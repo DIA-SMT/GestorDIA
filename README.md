@@ -3,7 +3,7 @@
 Sistema para **registrar y hacer seguimiento de los pagos con tarjeta** del equipo
 (credenciales, suscripciones, servicios). Permite discriminar por categoría,
 distinguir la suscripción del pago concreto, guardar el link de donde se pagó,
-adjuntar recibos y ver próximas renovaciones.
+adjuntar las facturas y armar la rendición para el contador.
 
 **Stack:** Next.js (App Router) · Supabase (Postgres + Auth + Storage) · Vercel.
 
@@ -22,26 +22,61 @@ adjuntar recibos y ver próximas renovaciones.
 |--------------|-----------|
 | `profiles`   | Usuarios del equipo (extiende `auth.users`). |
 | `categories` | Categorías para discriminar (IA, Hosting, Dominios…). |
-| `services`   | La suscripción/servicio: ciclo, monto esperado, estado, día de cobro y **ancla** del próximo ciclo sin confirmar. |
-| `payments`   | Cada pago concreto: monto, moneda, cotización, equivalente en ARS, fecha, link, estado, recibos, y el `cycle_date` si nació de un cargo recurrente. |
+| `services`   | El servicio: solo agrupa pagos (nombre, categoría, URL, estado). |
+| `payments`   | Cada pago concreto: monto, moneda, cotización, equivalente en ARS, fecha, link, estado, datos de facturación y recibos. |
 | `receipts`   | Comprobantes subidos a Supabase Storage, linkeados al pago. |
-| `service_cycle_skips` | Ciclos omitidos a propósito (para saber por qué un mes no generó gasto). |
+| `rendiciones` | Cada entrega al contador: número, fecha de presentación, período que cubre, totales congelados y el PDF archivado. |
 
 Un **servicio** agrupa muchos **pagos** en el tiempo. Los pagos sueltos van sin servicio.
+Una **rendición** agrupa los pagos de una entrega (`payments.rendicion_id`).
 
-### Cómo funcionan los cargos recurrentes
+### Cómo funciona la rendición
 
-`services.next_renewal_date` es una **marca de agua**: es el primer ciclo que
-todavía nadie confirmó. Todo lo anterior ya está resuelto.
+El circuito real no es mensual: el gasto se anota cuando se paga (que es cuando
+se sabe el monto) y las facturas llegan después, cuando el contador las pide.
 
-- Los cargos pendientes **no se guardan**: se derivan de esa fecha + el ciclo.
-  Nada se crea solo, ni siquiera al abrir la app.
-- **Confirmar** crea el pago con la **fecha del ciclo** (no la de hoy) y corre el
-  ancla un ciclo. Un `unique (service_id, cycle_date)` impide confirmarlo dos veces.
-- `billing_anchor_day` guarda el día real de cobro. Sin esa columna, un servicio
-  que cobra el 31 quedaría fijado al 28 después de pasar por febrero.
-- Un cargo por confirmar **no es un pago**: no suma en los totales ni entra en la
-  rendición hasta que se confirma.
+- La pantalla **Rendición** muestra **todo lo pendiente**, de cualquier período.
+  Un gasto de enero cuya factura llegó en marzo sigue a la vista; no hay que
+  acordarse de volver a enero. El filtro de período es opcional.
+- Cada pago dice **qué le falta** para que el contador lo acepte, y se completa
+  ahí mismo. Faltar el tipo de comprobante, el N° o el archivo adjunto es
+  bloqueante (avisa y pide confirmar); faltar proveedor, CUIT o cotización, no.
+- **Rendir cierra un lote numerado**: se crea la `rendicion`, se le enganchan los
+  pagos, se genera el PDF con las facturas incrustadas y se archiva una copia.
+- Los totales del lote quedan **congelados**. Si después se corrige la cotización
+  de un pago, la rendición Nº 7 sigue diciendo lo que decía el papel entregado, y
+  la ficha avisa que el detalle de hoy no coincide.
+- Reabrir un lote devuelve sus pagos a la cola. Sacar un solo pago (el que el
+  contador rebotó) recalcula los totales del lote.
+
+### Cómo se cargan los gastos
+
+**Cada gasto se carga a mano, cuando se paga.** No hay cargos automáticos ni
+suscripciones que se generen solas.
+
+Se probó el camino contrario —servicios con ciclo, monto esperado y cargos
+propuestos esperando confirmación— y no servía para este caso: el monto real
+cambia todos los meses (se suman o se sacan asientos, cambia el consumo), así
+que el sistema proponía siempre el número equivocado y corregirlo costaba más
+que cargar el pago de cero.
+
+Para lo que se repite está **"↻ Repetir"**, en cada pago de la lista, del
+detalle y del historial del servicio. Abre el formulario con todos los datos del
+pago original —servicio, categoría, descripción, monto, moneda, cotización,
+proveedor, CUIT, tipo de comprobante— con la fecha en **hoy** y el **N° de
+comprobante vacío**, porque cambia en cada factura y arrastrarlo sería rendir un
+número que no corresponde.
+
+El dashboard cierra el circuito: lista **lo que se pagó el mes pasado y este mes
+todavía no**, comparando por proveedor + descripción. No es una alerta de
+vencimiento —puede que este mes no corresponda— sino el recordatorio de qué
+falta cargar, cada uno con su botón de repetir.
+
+> Las columnas del esquema viejo (`billing_cycle`, `next_renewal_date`,
+> `expected_amount`, `payment_mode`, `billing_anchor_day`, `payments.cycle_date`)
+> y la tabla `service_cycle_skips` **siguen en la base**: no se borró nada,
+> simplemente no se usan. Tienen `default` en el esquema, así que no hizo falta
+> ninguna migración para dejar de escribirlas.
 
 ---
 
@@ -70,11 +105,17 @@ contenido de cada archivo de [`supabase/migrations/`](supabase/migrations/):
 1. [`0001_init.sql`](supabase/migrations/0001_init.sql) — tablas, RLS, bucket de recibos y categorías iniciales.
 2. [`0002_on_demand.sql`](supabase/migrations/0002_on_demand.sql) — ciclo "recarga a demanda".
 3. [`0003_rendido.sql`](supabase/migrations/0003_rendido.sql) — marca de rendición.
-4. [`0004_cargos_recurrentes.sql`](supabase/migrations/0004_cargos_recurrentes.sql) — cargos recurrentes por confirmar.
+4. [`0004_cargos_recurrentes.sql`](supabase/migrations/0004_cargos_recurrentes.sql) — histórica: creó las columnas de recurrencia. La app ya no las usa, pero correrla no molesta y las bases existentes las tienen.
+5. [`0005_rendiciones.sql`](supabase/migrations/0005_rendiciones.sql) — la rendición como lote numerado, con historial y PDF archivado.
 
 Todas son idempotentes: se pueden volver a correr sin romper nada. Si te falta la
-0004, la app avisa arriba de los cargos y funciona en modo degradado (un solo
-ciclo por servicio, sin protección contra doble confirmación).
+0005, se puede rendir igual pero los pagos se marcan sueltos: sin número, sin
+historial y sin PDF archivado.
+
+> La 0005 **no borra nada** y además **recupera las entregas viejas**: agrupa los
+> pagos ya rendidos por su `rendido_at` exacto (los marcados en una misma tanda
+> comparten el timestamp) y arma una rendición por cada una, así el historial no
+> arranca vacío.
 
 ### 4. Instalar y correr
 
@@ -100,30 +141,35 @@ y contraseña (Supabase Auth). Cada persona del equipo se crea su cuenta.
 
 ## Funcionalidades
 
-- **Cargos recurrentes por confirmar**: cuando un servicio mensual/anual vuelve a
-  renovar, el gasto aparece propuesto en el dashboard esperando el OK. Confirmalo
-  (crea el pago del período, heredando proveedor, CUIT, comprobante y cotización del
-  pago anterior), omitilo, o dá el servicio de baja si ya no se usa. Un anual se
-  propone una vez al año; uno mensual, una vez por mes. Si quedaron meses atrasados
-  se proponen todos, cada uno con su fecha, y hay un "poner al día" para saltearlos.
-- **Dashboard** con gasto del mes (ARS y USD), servicios activos y próximas renovaciones.
+- **Repetir un gasto**: botón `↻` en cada pago. Precarga todo lo que se mantiene
+  mes a mes y limpia lo que no (fecha en hoy, N° de comprobante en blanco). El
+  dashboard lista lo que se pagó el mes pasado y este mes todavía no.
+- **Dashboard** con gasto del mes (ARS y USD), pendiente de rendir, cuántos pagos
+  están sin factura y servicios activos. Cada KPI se abre y muestra qué lo compone.
 - **Pagos**: alta con monto + moneda + cotización, cálculo automático del equivalente
   en pesos, link de donde se pagó, estado, medio de pago, notas y **recibos adjuntos**.
   Botón para traer el **dólar tarjeta** automáticamente (dolarapi.com).
-- **Servicios/suscripciones**: ciclo de facturación, próxima renovación, estado
-  (activa/pausada/cancelada), historial de pagos por servicio.
+- **Servicios**: agrupan pagos para ver el historial y el total gastado en cada
+  uno. Nombre, categoría, URL, estado y notas — nada de ciclos ni montos esperados.
 - **Rendición de cuentas**: por cada pago se guarda **proveedor, CUIT, tipo y número
-  de comprobante**. La vista **Rendición** arma el detalle del mes con totales.
-  El botón **"PDF para imprimir y rendir"** genera el PDF (con los recibos
-  incrustados) y deja esos pagos marcados como presentados, con una barra de
-  **deshacer** y un **reimprimir** para cuando el contador lo vuelve a pedir. Hay
-  también una **vista previa que no marca nada** y exportación a CSV.
-  Solo se rinden los pagos en estado *Pagado*: los pendientes o fallidos quedan
-  afuera y vuelven a aparecer cuando se confirmen.
+  de comprobante**. La vista **Rendición** lista todo lo pendiente de cualquier
+  período, agrupado por mes con subtotales, y marca con chips **qué le falta a
+  cada pago** para que el contador lo acepte — completables ahí mismo con el
+  lápiz de la fila, sin abrir la ficha. El botón **"Rendir y generar
+  comprobante"** cierra un **lote numerado**, baja el PDF con las facturas
+  incrustadas y archiva la copia. Hay **vista previa** que no cierra nada y
+  exportación a CSV (con la columna de qué falta). Solo se rinden los pagos en
+  estado *Pagado*.
+- **Historial de rendiciones** (`/rendicion/historial`): cada entrega con su
+  número, fecha, período cubierto y total. Desde la ficha de un lote se
+  **descarga el comprobante entregado** (el PDF archivado, tal cual se imprimió),
+  se **reimprime** con los datos de hoy, se **saca** un pago que el contador
+  rebotó, o se **reabre** la rendición entera.
 - **Categorías**: crear/editar/borrar con color.
 - **Filtros** en el listado de pagos (búsqueda, categoría, estado, moneda).
 - **Recibos privados** en Supabase Storage con URLs firmadas temporales.
-- **Sidebar colapsable**: navegación lateral con badge de cargos por confirmar. El
+- **Sidebar colapsable**: navegación lateral con accesos separados a *Rendición*
+  (armar) y *Presentadas* (historial). El
   estado colapsado se recuerda (localStorage, aplicado antes del primer pintado para
   que no parpadee) y en mobile pasa a ser un cajón con overlay, Escape y foco.
 - **Diseño "liquid"**: fondo animado, glassmorphism y tipografía moderna.

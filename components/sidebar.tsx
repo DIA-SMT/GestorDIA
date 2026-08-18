@@ -19,16 +19,11 @@ const links = [
   { href: "/pagos", label: "Pagos", icon: IconCard },
   { href: "/servicios", label: "Servicios", icon: IconRepeat },
   { href: "/rendicion", label: "Rendición", icon: IconDoc },
+  { href: "/rendicion/historial", label: "Presentadas", icon: IconArchive },
   { href: "/categorias", label: "Categorías", icon: IconTag },
 ];
 
-export default function Sidebar({
-  email,
-  porConfirmar = 0,
-}: {
-  email: string;
-  porConfirmar?: number;
-}) {
+export default function Sidebar({ email }: { email: string }) {
   const pathname = usePathname();
   // `null` = todavía no sabemos (el HTML del server no puede conocer el
   // localStorage). Hasta que hidrate no se anuncia ningún estado, en vez de
@@ -119,8 +114,15 @@ export default function Sidebar({
     };
   }, [mobileOpen]);
 
-  const isActive = (href: string) =>
-    href === "/" ? pathname === "/" : pathname.startsWith(href);
+  // El detalle de una rendición cerrada (/rendicion/<id>) pertenece a
+  // "Presentadas", no al armado. Se remapea antes de comparar.
+  const ruta = pathname.startsWith("/rendicion/") ? "/rendicion/historial" : pathname;
+  // Gana el prefijo MÁS LARGO: si no, "Rendición" quedaría encendida también
+  // estando en "Presentadas", que ahora tiene entrada propia.
+  const hrefActivo = links
+    .filter((l) => (l.href === "/" ? ruta === "/" : ruta === l.href || ruta.startsWith(l.href + "/")))
+    .sort((a, b) => b.href.length - a.href.length)[0]?.href;
+  const isActive = (href: string) => href === hrefActivo;
 
   return (
     <>
@@ -142,9 +144,6 @@ export default function Sidebar({
           <Image src="/brand/muni.png" alt="" width={22} height={23} />
           gestor<span className="grad-text">DIA</span>
         </Link>
-        {porConfirmar > 0 && (
-          <span className="sidebar-badge" style={{ marginLeft: "auto" }}>{porConfirmar}</span>
-        )}
       </div>
 
       {mobileOpen && (
@@ -208,11 +207,6 @@ export default function Sidebar({
                   <Icon />
                 </span>
                 <span className="sidebar-label">{l.label}</span>
-                {l.href === "/" && porConfirmar > 0 && (
-                  <span className="sidebar-badge" title={`${porConfirmar} cargos por confirmar`}>
-                    {porConfirmar}
-                  </span>
-                )}
               </Link>
             );
           })}
@@ -312,6 +306,14 @@ function IconDoc() {
       <path d="M14 2.5H7A1.5 1.5 0 0 0 5.5 4v16A1.5 1.5 0 0 0 7 21.5h10a1.5 1.5 0 0 0 1.5-1.5V7z" />
       <path d="M14 2.5V7h4.5" />
       <path d="M8.5 13h7M8.5 17h7" />
+    </svg>
+  );
+}
+function IconArchive() {
+  return (
+    <svg {...svg}>
+      <path d="M3.5 7.5h17v12a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1z" />
+      <path d="M2.5 4.5h19v3h-19zM9.5 12h5" />
     </svg>
   );
 }

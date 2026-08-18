@@ -12,6 +12,8 @@ import { usePathname, useRouter } from "next/navigation";
 import { formatDate } from "@/lib/utils";
 import type { CurrencyCode } from "@/lib/types";
 import { downloadRendicionPdf, type RendicionPdfRow } from "@/lib/rendicion-pdf";
+import { archivarPdfRendicion } from "@/lib/rendicion-storage";
+import { archivarPdf } from "@/app/(dashboard)/rendicion/actions";
 
 interface ActionPdf {
   rows: RendicionPdfRow[];
@@ -19,6 +21,9 @@ interface ActionPdf {
   totalUSD: number;
   filename: string;
   title: string;
+  subtitulo?: string;
+  /** Presente cuando el PDF corresponde a un lote cerrado, para archivar la copia */
+  rendicionId?: string;
 }
 
 type ChatItem =
@@ -36,15 +41,6 @@ type ChatItem =
       pdf?: ActionPdf;
     };
 
-export interface AssistantAlert {
-  id: string;
-  name: string;
-  date: string;
-  days: number; // negativo = vencido
-  amount: number | null;
-  currency: CurrencyCode;
-  auto: boolean; // true = débito automático, false = pago manual
-}
 
 const SUGERENCIAS = [
   "¿Cuánto gastamos este mes?",
@@ -68,7 +64,7 @@ function toLlmMessages(items: ChatItem[]) {
   });
 }
 
-export default function Assistant({ alerts = [] }: { alerts?: AssistantAlert[] }) {
+export default function Assistant() {
   const pathname = usePathname();
   const router = useRouter();
   const [open, setOpen] = useState(false);
@@ -124,10 +120,6 @@ export default function Assistant({ alerts = [] }: { alerts?: AssistantAlert[] }
     }
   }
 
-  // "Ya lo pagué" desde una alerta manual: pide al bot registrar el pago del servicio
-  function payFromAlert(a: AssistantAlert) {
-    send(`Ya pagué "${a.name}", registrá el pago y avanzá la próxima fecha de cobro.`);
-  }
 
   async function runAction(index: number) {
     const item = items[index];
@@ -187,11 +179,6 @@ export default function Assistant({ alerts = [] }: { alerts?: AssistantAlert[] }
         ) : (
           <Image src="/brand/bot.png" alt="" width={36} height={25} />
         )}
-        {!open && alerts.length > 0 && (
-          <span className="assistant-fab-badge" aria-label={`${alerts.length} alertas`}>
-            {alerts.length}
-          </span>
-        )}
       </button>
 
       {/* Panel de chat */}
@@ -222,47 +209,6 @@ export default function Assistant({ alerts = [] }: { alerts?: AssistantAlert[] }
           <div ref={listRef} style={{ flex: 1, overflowY: "auto", padding: "1rem 1.1rem", display: "flex", flexDirection: "column", gap: "0.65rem" }}>
             {items.length === 0 && (
               <div style={{ display: "grid", gap: "0.5rem", marginTop: "0.5rem" }}>
-                {alerts.length > 0 && (
-                  <div
-                    style={{
-                      padding: "0.7rem 0.85rem",
-                      borderRadius: "14px 14px 14px 4px",
-                      background: "rgba(251, 191, 36, 0.07)",
-                      border: "1px solid rgba(251, 191, 36, 0.25)",
-                      display: "grid",
-                      gap: "0.45rem",
-                      marginBottom: "0.4rem",
-                    }}
-                  >
-                    <span style={{ fontSize: "0.8rem", fontWeight: 600, color: "#fbbf24" }}>
-                      🔔 {alerts.length === 1 ? "1 alerta de pago" : `${alerts.length} alertas de pagos`}
-                    </span>
-                    {alerts.map((a) => (
-                      <div key={a.id} style={{ fontSize: "0.82rem", lineHeight: 1.4 }}>
-                        <Link href={`/servicios/${a.id}`} style={{ color: "var(--text)" }}>
-                          <span style={{ fontWeight: 600 }}>{a.name}</span>
-                          {a.auto ? " se debita" : " tenés que pagarlo"} el {formatDate(a.date)}{" "}
-                          <span style={{ color: a.days <= 0 ? "#f87171" : "#fbbf24", fontWeight: 600 }}>
-                            {a.days < 0 ? `(venció hace ${-a.days}d)` : a.days === 0 ? "(¡hoy!)" : `(en ${a.days}d)`}
-                          </span>
-                        </Link>
-                        {!a.auto && (
-                          <div style={{ marginTop: 3 }}>
-                            <button
-                              type="button"
-                              className="btn btn-ghost"
-                              style={{ padding: "0.2rem 0.55rem", fontSize: "0.74rem" }}
-                              onClick={() => payFromAlert(a)}
-                              disabled={busy}
-                            >
-                              ✓ Ya lo pagué
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
                 <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", margin: 0 }}>
                   Hola 👋 Puedo responder con los datos de gestorDIA y también cargar gastos, crear servicios o rendir pagos por vos. Probá con:
                 </p>
@@ -441,6 +387,12 @@ function BotonPdf({ pdf }: { pdf: ActionPdf }) {
       setEstado("error");
       setDetalle(r.error ?? "No se pudo generar el PDF.");
       return;
+    }
+    // Si el chat cerró una rendición, su comprobante se archiva igual que el de
+    // la pantalla: el lote no puede quedar sin la copia de lo que se entregó.
+    if (pdf.rendicionId && r.blob) {
+      const path = await archivarPdfRendicion(pdf.rendicionId, r.blob, pdf.filename);
+      if (path) await archivarPdf(pdf.rendicionId, path);
     }
     setEstado("listo");
     setDetalle(

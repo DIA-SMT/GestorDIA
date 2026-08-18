@@ -1,9 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getService, listCategories, getServicePayments } from "@/lib/data";
-import { loadPendingCharges } from "@/lib/pending";
 import ServiceForm from "@/components/service-form";
-import PendingCharges from "@/components/pending-charges";
 import { updateService, deleteService } from "../actions";
 import { formatMoney, formatDate, toARS } from "@/lib/utils";
 import { PaymentStatusBadge } from "@/components/badges";
@@ -15,16 +13,13 @@ export default async function ServicioDetallePage({
 }) {
   const { id } = await params;
 
-  const [s, categories, pays, pending] = await Promise.all([
+  const [s, categories, pays] = await Promise.all([
     getService(id),
     listCategories(),
     getServicePayments(id),
-    loadPendingCharges(),
   ]);
 
   if (!s) notFound();
-  const misCargos = pending.groups.filter((g) => g.serviceId === id);
-  const cargosPendientes = misCargos.reduce((a, g) => a + g.charges.length, 0);
   const totalARS = pays
     .filter((p) => p.status === "paid")
     .reduce((acc, p) => acc + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
@@ -51,11 +46,6 @@ export default async function ServicioDetallePage({
         </form>
       </div>
 
-      {/* Cargos de este servicio esperando el OK */}
-      {cargosPendientes > 0 && (
-        <PendingCharges groups={misCargos} migrado={pending.migrado} titulo="Cargos de este servicio por confirmar" />
-      )}
-
       {/* Historial de pagos del servicio */}
       <section className="card" style={{ padding: "1.25rem" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.9rem" }}>
@@ -71,13 +61,21 @@ export default async function ServicioDetallePage({
         ) : (
           <div style={{ display: "grid", gap: "0.4rem" }}>
             {pays.map((p) => (
-              <Link key={p.id} href={`/pagos/${p.id}`} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.55rem 0.75rem", background: "rgba(255,255,255,0.045)", borderRadius: "0.5rem", fontSize: "0.88rem" }}>
-                <span style={{ color: "var(--text-muted)" }}>{formatDate(p.payment_date)}</span>
+              <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0.55rem 0.75rem", background: "rgba(255,255,255,0.045)", borderRadius: "0.5rem", fontSize: "0.88rem", gap: "0.75rem" }}>
+                <Link href={`/pagos/${p.id}`} style={{ color: "var(--text-muted)" }}>{formatDate(p.payment_date)}</Link>
                 <span style={{ display: "flex", alignItems: "center", gap: "0.8rem" }}>
                   <span style={{ fontWeight: 600 }}>{formatMoney(p.amount, p.currency)}</span>
                   <PaymentStatusBadge status={p.status} />
+                  <Link
+                    href={`/pagos/nuevo?repetir=${p.id}`}
+                    className="btn btn-ghost"
+                    style={{ padding: "0.2rem 0.55rem", fontSize: "0.74rem" }}
+                    title="Cargar otro pago igual a este"
+                  >
+                    ↻
+                  </Link>
                 </span>
-              </Link>
+              </div>
             ))}
           </div>
         )}
@@ -91,7 +89,6 @@ export default async function ServicioDetallePage({
           categories={categories}
           service={s}
           submitLabel="Guardar cambios"
-          cargosPendientes={cargosPendientes}
         />
       </section>
     </div>

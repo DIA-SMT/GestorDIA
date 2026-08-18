@@ -3,33 +3,25 @@
 // tarjeta de confirmación con los datos resueltos) y recién cuando el
 // usuario confirma en el chat se ejecuta (executeAction).
 
-import type { BillingCycle, CurrencyCode, Payment, PaymentStatus, ReceiptType } from "./types";
-import { BILLING_CYCLE_LABELS, RECEIPT_TYPE_LABELS } from "./types";
+import type { CurrencyCode, Payment, PaymentStatus, ReceiptType } from "./types";
+import { RECEIPT_TYPE_LABELS } from "./types";
 import {
   listCategories,
   listServicesSimple,
   listPayments,
   listPaymentsBetween,
   createPayment,
-  createCyclePayment,
   createService,
-  setPaymentsRendido,
-  setServiceRenewal,
+  crearRendicion,
+  getCurrentUser,
   getReceiptUrls,
   type PaymentInput,
   type ServiceInput,
 } from "./data";
-import {
-  formatMoney,
-  formatDate,
-  toARS,
-  nextCycleDate,
-  anchorDayOf,
-  todayISO,
-  isRecurring,
-  periodLabel,
-} from "./utils";
+import { formatMoney, formatDate, toARS, todayISO } from "./utils";
 import type { RendicionPdfRow } from "./rendicion-pdf";
+import { filasDePagos, nombreArchivoDe, subtituloDe, tituloDe } from "./rendicion-doc";
+import type { Rendicion } from "./types";
 
 // ---------- Definiciones para el LLM (formato OpenAI/OpenRouter) ----------
 export const TOOL_DEFS = [
@@ -69,7 +61,7 @@ export const TOOL_DEFS = [
     function: {
       name: "crear_servicio",
       description:
-        "Crea un servicio/suscripción nuevo (ej: un hosting, una herramienta con cobro mensual). Usala cuando el usuario pida crear o dar de alta un servicio.",
+        "Crea un servicio nuevo. Un servicio solo AGRUPA pagos (ej: Cursor Pro, Vercel), para ver el historial y el total gastado. No tiene ciclo, monto esperado ni fecha de cobro, y no genera gastos: los pagos se cargan uno por uno cuando se pagan. Usala cuando el usuario pida crear o dar de alta un servicio.",
       parameters: {
         type: "object",
         properties: {
@@ -77,38 +69,8 @@ export const TOOL_DEFS = [
           descripcion: { type: "string" },
           url: { type: "string", description: "URL de gestión/facturación (opcional)" },
           categoria: { type: "string", description: "Nombre de una categoría existente (opcional)" },
-          ciclo: {
-            type: "string",
-            enum: ["monthly", "yearly", "quarterly", "weekly", "one_time", "on_demand"],
-            description: "Ciclo de facturación",
-          },
-          monto_estimado: { type: "number", description: "Monto esperado por ciclo (opcional)" },
-          moneda: { type: "string", enum: ["ARS", "USD", "EUR"] },
-          modo_pago: {
-            type: "string",
-            enum: ["automatic", "manual"],
-            description: "automatic = se debita solo; manual = hay que pagarlo (genera alertas)",
-          },
-          proxima_renovacion: { type: "string", description: "Próxima fecha de cobro YYYY-MM-DD (opcional)" },
         },
-        required: ["nombre", "ciclo", "moneda"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "pagar_servicio",
-      description:
-        "Registra el pago de un servicio existente (típicamente uno de pago manual que el usuario acaba de pagar) y adelanta su próxima fecha de cobro un ciclo. Usala cuando el usuario diga que ya pagó un servicio o toque 'Ya lo pagué'. El monto por defecto es el estimado del servicio; si el usuario aclara otro monto, usá ese.",
-      parameters: {
-        type: "object",
-        properties: {
-          servicio: { type: "string", description: "Nombre del servicio que se pagó" },
-          monto: { type: "number", description: "Monto real pagado (si no se aclara, se usa el estimado del servicio)" },
-          fecha: { type: "string", description: "Fecha del pago YYYY-MM-DD (default hoy)" },
-        },
-        required: ["servicio"],
+        required: ["nombre"],
       },
     },
   },
@@ -160,11 +122,19 @@ export interface ActionResult {
   ok: boolean;
   message: string;
   href?: string;
-  pdf?: { rows: RendicionPdfRow[]; totalARS: number; totalUSD: number; filename: string; title: string };
+  pdf?: {
+    rows: RendicionPdfRow[];
+    totalARS: number;
+    totalUSD: number;
+    filename: string;
+    title: string;
+    subtitulo?: string;
+    /** Si el PDF corresponde a un lote cerrado, el chat archiva la copia */
+    rendicionId?: string;
+  };
 }
 
 const CURRENCIES: CurrencyCode[] = ["ARS", "USD", "EUR"];
-const CYCLES: BillingCycle[] = ["monthly", "yearly", "quarterly", "weekly", "one_time", "on_demand", "custom"];
 const RECEIPT_TYPES = Object.keys(RECEIPT_TYPE_LABELS) as ReceiptType[];
 
 const isDate = (s: unknown): s is string => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
@@ -217,10 +187,15 @@ async function resolveRendicionPayments(raw: Record<string, unknown>): Promise<{
 }
 
 // Arma el payload del PDF (con recibos incrustados vía URL firmada) para el chat
+// Si viene `lote`, el PDF sale identificado como esa rendición (mismo número,
+// mismo subtítulo y mismo nombre de archivo que el que genera la pantalla): un
+// comprobante cerrado desde el chat tiene que ser indistinguible de uno cerrado
+// desde /rendicion.
 async function buildRendicionPdf(
   found: Payment[],
   label: string,
-  mes: string | null
+  mes: string | null,
+  lote?: Rendicion | null
 ): Promise<NonNullable<ActionResult["pdf"]>> {
   const paths = found
     .flatMap((p) => p.receipts ?? [])
@@ -228,23 +203,7 @@ async function buildRendicionPdf(
     .filter((p): p is string => !!p);
   const urls = paths.length ? await getReceiptUrls([...new Set(paths)]) : {};
 
-  const rows: RendicionPdfRow[] = found.map((p) => ({
-    fecha: formatDate(p.payment_date),
-    proveedor: p.provider ?? "",
-    cuit: p.provider_tax_id ?? "",
-    descripcion: p.description ?? p.service?.name ?? "",
-    comprobante: RECEIPT_TYPE_LABELS[p.receipt_type],
-    nro: p.receipt_number ?? "",
-    moneda: p.currency,
-    monto: Number(p.amount),
-    ars: toARS(Number(p.amount), p.currency, p.exchange_rate),
-    recibo: (p.receipts?.length ?? 0) > 0,
-    receipts: (p.receipts ?? []).map((r) => ({
-      file_name: r.file_name,
-      mime_type: r.mime_type,
-      url: r.file_path ? urls[r.file_path] ?? null : null,
-    })),
-  }));
+  const rows: RendicionPdfRow[] = filasDePagos(found, urls);
   const totalARS = rows.reduce((a, r) => a + (r.ars ?? 0), 0);
   const totalUSD = found.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
 
@@ -252,29 +211,11 @@ async function buildRendicionPdf(
     rows,
     totalARS,
     totalUSD,
-    filename: `rendicion-${mes ?? today()}.pdf`,
-    title: `Rendición de cuentas — ${label}`,
+    filename: lote ? nombreArchivoDe(lote.numero) : `rendicion-${mes ?? today()}.pdf`,
+    title: lote ? tituloDe(lote) : `Rendición de cuentas — ${label}`,
+    subtitulo: lote ? subtituloDe(lote) : undefined,
+    rendicionId: lote?.id,
   };
-}
-
-// Si el período que se va a rendir tiene cargos recurrentes sin confirmar, el
-// PDF le sale incompleto al contador. Se avisa en la tarjeta de confirmación.
-async function avisoCargosSinConfirmar(mes: string | null): Promise<string[]> {
-  try {
-    const { loadPendingCharges } = await import("./pending");
-    const pending = await loadPendingCharges();
-    const cargos = pending.groups
-      .flatMap((g) => g.charges)
-      .filter((c) => (mes ? c.cycleDate.slice(0, 7) === mes : true));
-    if (cargos.length === 0) return [];
-    const nombres = [...new Set(cargos.map((c) => c.serviceName))].join(", ");
-    return [
-      `Quedan ${cargos.length} cargo(s) sin confirmar${mes ? " de ese mes" : ""} (${nombres}): ` +
-        "todavía no son un pago, así que no entran en este PDF. Confirmalos en el dashboard si corresponden.",
-    ];
-  } catch {
-    return [];
-  }
 }
 
 async function resolveCategoria(
@@ -369,111 +310,24 @@ export async function buildProposal(
   if (tool === "crear_servicio") {
     const nombre = typeof raw.nombre === "string" ? raw.nombre.trim() : "";
     if (!nombre) return { error: "Falta el nombre del servicio." };
-    const ciclo = CYCLES.includes(raw.ciclo as BillingCycle) ? (raw.ciclo as BillingCycle) : "monthly";
-    const moneda = CURRENCIES.includes(raw.moneda as CurrencyCode) ? (raw.moneda as CurrencyCode) : "ARS";
-    const modo = raw.modo_pago === "manual" ? "manual" : "automatic";
-    const monto = Number(raw.monto_estimado) > 0 ? Number(raw.monto_estimado) : null;
-    const renovacion = isDate(raw.proxima_renovacion) ? raw.proxima_renovacion : null;
-    if (!renovacion && ciclo !== "on_demand" && ciclo !== "one_time") {
-      warnings.push("Sin fecha de próxima renovación no va a aparecer en las alertas de vencimiento.");
-    }
     const categoria = await resolveCategoria(raw.categoria, warnings);
-    const category_id = categoria?.id ?? null;
 
     const input: ServiceInput = {
       name: nombre,
       description: typeof raw.descripcion === "string" ? raw.descripcion : null,
       url: typeof raw.url === "string" ? raw.url : null,
-      category_id,
-      billing_cycle: ciclo,
-      expected_amount: monto,
-      currency: moneda,
+      category_id: categoria?.id ?? null,
       status: "active",
-      payment_mode: modo,
-      next_renewal_date: renovacion,
     };
 
     const fields = [
       { label: "Nombre", value: nombre },
       ...(categoria ? [{ label: "Categoría", value: categoria.name }] : []),
-      { label: "Ciclo", value: BILLING_CYCLE_LABELS[ciclo] },
-      ...(monto != null ? [{ label: "Monto estimado", value: `${formatMoney(monto, moneda)} por ciclo` }] : []),
-      { label: "Modo de pago", value: modo === "manual" ? "Manual (genera alertas)" : "Débito automático" },
-      ...(renovacion ? [{ label: "Próxima renovación", value: formatDate(renovacion) }] : []),
+      ...(input.url ? [{ label: "URL", value: input.url }] : []),
+      { label: "Para qué sirve", value: "Agrupa los pagos de este servicio; los gastos se cargan uno por uno" },
     ];
 
     return { tool, title: "Crear servicio", fields, warnings, args: { input } };
-  }
-
-  if (tool === "pagar_servicio") {
-    const nombre = typeof raw.servicio === "string" ? raw.servicio.trim() : "";
-    if (!nombre) return { error: "¿Qué servicio pagaste?" };
-    const services = await listServicesSimple();
-    const q = nombre.toLowerCase();
-    const srv = services.find((s) => s.name.toLowerCase() === q) ?? services.find((s) => s.name.toLowerCase().includes(q));
-    if (!srv) return { error: `No encontré un servicio que se llame "${nombre}".` };
-
-    const monto = Number(raw.monto) > 0 ? Number(raw.monto) : srv.expected_amount ?? null;
-    if (monto == null || monto <= 0) {
-      return { error: `El servicio "${srv.name}" no tiene monto estimado. ¿Cuánto pagaste?` };
-    }
-    // "Ya pagué X" resuelve el ciclo que está esperando confirmación, que es
-    // justamente el ancla del servicio. Se registra igual que el botón
-    // "Confirmar": con cycle_date, para que el ciclo quede marcado como resuelto
-    // y no desaparezca sin rastro cuando el ancla avance.
-    const cycleDate = isRecurring(srv.billing_cycle) ? srv.next_renewal_date : null;
-    // La fecha del pago es la del ciclo (así cae en la rendición del mes que
-    // corresponde), salvo que el usuario aclare otra explícitamente.
-    const fecha = isDate(raw.fecha) ? raw.fecha : cycleDate ?? today();
-
-    // Próxima renovación: EXACTAMENTE un ciclo después del ancla.
-    // Antes acá se hacía upcomingRenewal(nextCycleDate(...)), que saltaba al
-    // primer ciclo futuro y se comía en silencio todos los ciclos atrasados que
-    // todavía estaban esperando confirmación.
-    const nextRenewal =
-      nextCycleDate(srv.next_renewal_date, srv.billing_cycle, anchorDayOf(srv)) ?? srv.next_renewal_date;
-
-    const input: PaymentInput = {
-      service_id: srv.id,
-      category_id: srv.category_id,
-      description: cycleDate
-        ? `${srv.name} — ${periodLabel(cycleDate, srv.billing_cycle)}`
-        : `${srv.name} — ${BILLING_CYCLE_LABELS[srv.billing_cycle]}`,
-      amount: monto,
-      currency: srv.currency,
-      exchange_rate: null,
-      amount_ars: srv.currency === "ARS" ? monto : null,
-      payment_date: fecha,
-      payment_url: null,
-      status: "paid",
-      payment_method: null,
-      provider: null,
-      provider_tax_id: null,
-      receipt_type: "sin_comprobante",
-      receipt_number: null,
-      notes: null,
-    };
-
-    if (srv.currency !== "ARS") {
-      warnings.push("Sin cotización no suma en los totales en ARS (podés editar el pago para cargarla).");
-    }
-
-    const fields = [
-      { label: "Servicio", value: srv.name },
-      { label: "Monto", value: formatMoney(monto, srv.currency) },
-      { label: "Fecha", value: formatDate(fecha) },
-      ...(nextRenewal && nextRenewal !== srv.next_renewal_date
-        ? [{ label: "Próxima renovación", value: formatDate(nextRenewal) }]
-        : []),
-    ];
-
-    return {
-      tool,
-      title: cycleDate ? `Registrar pago del servicio — ${periodLabel(cycleDate, srv.billing_cycle)}` : "Registrar pago del servicio",
-      fields,
-      warnings,
-      args: { input, serviceId: srv.id, nextRenewal, cycleDate },
-    };
   }
 
   if (tool === "generar_rendicion") {
@@ -500,7 +354,6 @@ export async function buildProposal(
 
     const yaRendidos = found.filter((p) => p.rendido_at).length;
     if (yaRendidos > 0) warnings.push(`${yaRendidos} de estos pagos ya estaban rendidos (se incluyen igual en el PDF).`);
-    warnings.push(...(await avisoCargosSinConfirmar(mes)));
 
     return {
       tool,
@@ -561,7 +414,6 @@ export async function buildProposal(
       value: `${p.description || p.service?.name || p.provider || "Pago"} — ${formatMoney(Number(p.amount), p.currency)}`,
     }));
     if (found.length > MAX) fields.push({ label: "…", value: `y ${found.length - MAX} pago(s) más` });
-    warnings.push(...(await avisoCargosSinConfirmar(mes)));
 
     return {
       tool,
@@ -610,30 +462,6 @@ export async function executeAction(
     return { ok: true, message: `Servicio creado: ${input.name}.`, href: `/servicios/${r.id}` };
   }
 
-  if (tool === "pagar_servicio") {
-    const input = args.input as PaymentInput;
-    const serviceId = args.serviceId as string;
-    const nextRenewal = (args.nextRenewal as string | null) ?? null;
-    const cycleDate = typeof args.cycleDate === "string" ? args.cycleDate : null;
-
-    // Con ciclo: se registra como cargo del período (mismo camino que el botón
-    // "Confirmar"), así el índice único impide pagarlo dos veces y el ciclo
-    // queda marcado como resuelto. Sin ciclo (one_time, a demanda): pago suelto.
-    const r: { id?: string; error?: string; duplicate?: boolean } = cycleDate
-      ? await createCyclePayment(input, cycleDate, userId)
-      : await createPayment(input, [], userId);
-    if (r.duplicate) return { ok: false, message: "Ese período ya estaba registrado." };
-    if (r.error || !r.id) return { ok: false, message: r.error ?? "No se pudo registrar el pago." };
-    if (nextRenewal) await setServiceRenewal(serviceId, nextRenewal);
-    return {
-      ok: true,
-      message: `Pago registrado: ${input.description} (${formatMoney(input.amount, input.currency)})${
-        nextRenewal ? `. Próxima renovación: ${formatDate(nextRenewal)}.` : "."
-      }`,
-      href: `/servicios/${serviceId}`,
-    };
-  }
-
   if (tool === "generar_rendicion") {
     const ids = idsExplicitos(args);
     if (!ids) return { ok: false, message: "No recibí qué pagos incluir en la rendición." };
@@ -658,23 +486,31 @@ export async function executeAction(
   if (tool === "marcar_rendido") {
     const ids = idsExplicitos(args);
     if (!ids) return { ok: false, message: "No recibí qué pagos marcar como rendidos." };
-    const { found } = await resolveRendicionPayments({ pago_ids: ids });
-    if (found.length === 0) return { ok: false, message: "No encontré los pagos a rendir." };
 
-    const r = await setPaymentsRendido(found.map((p) => p.id), true);
-    if (r.error) return { ok: false, message: r.error };
-    if (r.updated === 0) {
-      return { ok: false, message: "Esos pagos ya estaban rendidos: conservan su fecha de presentación original." };
+    // Cierra un lote igual que la pantalla, no una marca suelta: si el chat
+    // marcara pagos sin rendición, quedarían fuera del historial y sin
+    // comprobante asociado, que es justo lo que este rediseño vino a arreglar.
+    const user = await getCurrentUser();
+    const r = await crearRendicion(
+      { ids, titulo: null, notas: "Cerrada desde el asistente." },
+      user?.id ?? null
+    );
+    if (r.error || r.payments.length === 0) {
+      return { ok: false, message: r.error ?? "No se pudo cerrar la rendición." };
     }
 
     const label = typeof args.label === "string" ? args.label : formatDate(today());
     const mes = typeof args.mes === "string" ? args.mes : null;
-    const pdf = await buildRendicionPdf(found, label, mes);
+    const pdf = await buildRendicionPdf(r.payments, label, mes, r.rendicion);
 
+    const nro = r.rendicion ? ` N° ${r.rendicion.numero}` : "";
+    const afuera = r.descartados > 0 ? ` ${r.descartados} quedaron afuera (ya rendidos o sin confirmar).` : "";
     return {
       ok: true,
-      message: `${found.length} ${found.length === 1 ? "pago marcado" : "pagos marcados"} como rendidos. El PDF quedó listo para descargar.`,
-      href: "/rendicion",
+      message: `Rendición${nro} cerrada con ${r.payments.length} ${
+        r.payments.length === 1 ? "pago" : "pagos"
+      }. Descargá el comprobante acá abajo.${afuera}`,
+      href: r.rendicion ? `/rendicion/${r.rendicion.id}` : "/rendicion",
       pdf,
     };
   }

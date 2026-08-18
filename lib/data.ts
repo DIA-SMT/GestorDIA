@@ -10,13 +10,13 @@ import type {
   Payment,
   Receipt,
   Service,
-  BillingCycle,
   ServiceStatus,
   PaymentStatus,
   ReceiptType,
-  PaymentMode,
+  Rendicion,
 } from "./types";
 import { demoDb, newId } from "./demo-store";
+import { toARS } from "./utils";
 
 export const IS_DEMO =
   !process.env.NEXT_PUBLIC_SUPABASE_URL ||
@@ -55,12 +55,7 @@ export interface ServiceInput {
   description: string | null;
   url: string | null;
   category_id: string | null;
-  billing_cycle: BillingCycle;
-  expected_amount: number | null;
-  currency: CurrencyCode;
   status: ServiceStatus;
-  payment_mode: PaymentMode;
-  next_renewal_date: string | null;
 }
 
 export interface FileLike {
@@ -165,19 +160,18 @@ export async function listServices(): Promise<Service[]> {
     const order: Record<ServiceStatus, number> = { active: 0, paused: 1, cancelled: 2 };
     return [...demoDb().services]
       .map(hydrateService)
-      .sort((a, b) => {
-        if (order[a.status] !== order[b.status]) return order[a.status] - order[b.status];
-        if (!a.next_renewal_date) return 1;
-        if (!b.next_renewal_date) return -1;
-        return a.next_renewal_date.localeCompare(b.next_renewal_date);
-      });
+      .sort((a, b) =>
+        order[a.status] !== order[b.status]
+          ? order[a.status] - order[b.status]
+          : a.name.localeCompare(b.name)
+      );
   }
   const supabase = await sb();
   const { data } = await supabase
     .from("services")
     .select("*, category:categories(*)")
     .order("status", { ascending: true })
-    .order("next_renewal_date", { ascending: true, nullsFirst: false });
+    .order("name", { ascending: true });
   return (data ?? []) as Service[];
 }
 
@@ -275,21 +269,6 @@ export async function updateService(id: string, input: ServiceInput): Promise<{ 
   }
   const supabase = await sb();
   const { error } = await supabase.from("services").update(input).eq("id", id);
-  return { error: error?.message };
-}
-
-// Actualiza solo la próxima fecha de cobro de un servicio (al registrar un pago)
-export async function setServiceRenewal(id: string, nextRenewalDate: string | null): Promise<{ error?: string }> {
-  if (IS_DEMO) {
-    const s = demoDb().services.find((x) => x.id === id);
-    if (s) {
-      s.next_renewal_date = nextRenewalDate;
-      s.updated_at = nowIso();
-    }
-    return {};
-  }
-  const supabase = await sb();
-  const { error } = await supabase.from("services").update({ next_renewal_date: nextRenewalDate }).eq("id", id);
   return { error: error?.message };
 }
 
@@ -501,278 +480,36 @@ export async function deletePayment(id: string): Promise<void> {
 }
 
 // ============================================================
-// CARGOS RECURRENTES
+// SONDEO DE MIGRACIONES
 // ============================================================
-// Ver lib/recurring.ts para el modelo. Acá va solo el acceso a datos.
-
-// ¿Está corrida la migración 0004? La app tiene que seguir funcionando si no,
-// así que se sondea una vez y se cachea 60 segundos: apenas el usuario corre el
-// SQL se auto-cura sin necesidad de redeploy.
+// La app tiene que seguir funcionando si falta correr un SQL, así que se sondea
+// una vez y se cachea 60 segundos: apenas el usuario lo corre, se auto-cura sin
+// necesidad de redeploy.
 interface MigrationProbe {
   value: boolean;
   at: number;
 }
 const PROBE_TTL_MS = 60_000;
 
-export async function hasRecurrenceColumns(): Promise<boolean> {
-  if (IS_DEMO) return true;
-  const g = globalThis as unknown as { __gestorRecurrenceProbe?: MigrationProbe };
-  const cached = g.__gestorRecurrenceProbe;
-  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.value;
-
-  const supabase = await sb();
-  const { error } = await supabase.from("payments").select("cycle_date").limit(1);
-  if (!error) {
-    g.__gestorRecurrenceProbe = { value: true, at: Date.now() };
-    return true;
-  }
-
-  // Solo "no existe la columna/tabla" significa que falta la migración.
-  // Cualquier otro error (red caída, token vencido, RLS) es transitorio: si se
-  // tomara como "falta el SQL" se cachearía el modo degradado 60 segundos y el
-  // usuario vería el cartel amarillo con la migración ya corrida.
-  const falta = error.code === "42703" || error.code === "42P01" || /column .* does not exist/i.test(error.message);
-  if (falta) {
-    g.__gestorRecurrenceProbe = { value: false, at: Date.now() };
-    console.warn(
-      "[gestorDIA] Falta correr supabase/migrations/0004_cargos_recurrentes.sql:",
-      error.message
-    );
-    return false;
-  }
-
-  // Error transitorio: no se cachea nada y se asume migrado (el índice único
-  // de la base sigue siendo la última línea de defensa contra duplicados).
-  console.warn("[gestorDIA] No se pudo sondear el esquema:", error.message);
-  return true;
-}
-
-export interface RecurringContext {
-  confirmados: Set<string>;
-  omitidos: Set<string>;
-  pagosSueltos: { id: string; service_id: string; payment_date: string; amount: number; currency: CurrencyCode }[];
-  mesesRendidos: Set<string>;
-  /** false = falta la migración 0004; se trabaja en modo degradado */
-  migrado: boolean;
-}
-
-const cycleKey = (serviceId: string, cycleDate: string) => `${serviceId}|${cycleDate}`;
-
-export async function getRecurringContext(desde: string): Promise<RecurringContext> {
-  if (IS_DEMO) {
-    const db = demoDb();
-    const confirmados = new Set<string>();
-    const mesesRendidos = new Set<string>();
-    const pagosSueltos: RecurringContext["pagosSueltos"] = [];
-    for (const p of db.payments) {
-      if (p.service_id && p.cycle_date) confirmados.add(cycleKey(p.service_id, p.cycle_date));
-      if (p.rendido_at) mesesRendidos.add(p.payment_date.slice(0, 7));
-      if (p.service_id && !p.cycle_date && p.payment_date >= desde) {
-        pagosSueltos.push({
-          id: p.id,
-          service_id: p.service_id,
-          payment_date: p.payment_date,
-          amount: Number(p.amount),
-          currency: p.currency,
-        });
-      }
-    }
-    return {
-      confirmados,
-      omitidos: new Set(db.skips.map((s) => cycleKey(s.service_id, s.cycle_date))),
-      pagosSueltos,
-      mesesRendidos,
-      migrado: true,
-    };
-  }
-
-  const migrado = await hasRecurrenceColumns();
-  const supabase = await sb();
-
-  const [ciclos, sueltos, rendidos, skips] = await Promise.all([
-    migrado
-      ? supabase.from("payments").select("service_id, cycle_date").not("cycle_date", "is", null)
-      : Promise.resolve({ data: [] as { service_id: string | null; cycle_date: string | null }[] }),
-    migrado
-      ? supabase
-          .from("payments")
-          .select("id, service_id, payment_date, amount, currency")
-          .not("service_id", "is", null)
-          .is("cycle_date", null)
-          .gte("payment_date", desde)
-      : supabase
-          .from("payments")
-          .select("id, service_id, payment_date, amount, currency")
-          .not("service_id", "is", null)
-          .gte("payment_date", desde),
-    supabase.from("payments").select("payment_date").not("rendido_at", "is", null),
-    migrado
-      ? supabase.from("service_cycle_skips").select("service_id, cycle_date")
-      : Promise.resolve({ data: [] as { service_id: string; cycle_date: string }[] }),
-  ]);
-
-  const confirmados = new Set<string>();
-  for (const r of (ciclos.data ?? []) as { service_id: string | null; cycle_date: string | null }[]) {
-    if (r.service_id && r.cycle_date) confirmados.add(cycleKey(r.service_id, r.cycle_date));
-  }
-  const omitidos = new Set<string>();
-  for (const r of (skips.data ?? []) as { service_id: string; cycle_date: string }[]) {
-    omitidos.add(cycleKey(r.service_id, r.cycle_date));
-  }
-  const mesesRendidos = new Set<string>();
-  for (const r of (rendidos.data ?? []) as { payment_date: string }[]) {
-    mesesRendidos.add(r.payment_date.slice(0, 7));
-  }
-
-  return {
-    confirmados,
-    omitidos,
-    pagosSueltos: ((sueltos.data ?? []) as RecurringContext["pagosSueltos"]).map((p) => ({
-      ...p,
-      amount: Number(p.amount),
-    })),
-    mesesRendidos,
-    migrado,
-  };
-}
-
-// Último pago de un servicio: de ahí se heredan los datos de rendición
-// (proveedor, CUIT, tipo de comprobante, cotización) al confirmar un cargo,
-// para que la rendición no salga con el proveedor vacío.
-export async function lastPaymentForService(serviceId: string): Promise<Payment | null> {
-  if (IS_DEMO) {
-    const rows = demoDb()
-      .payments.filter((p) => p.service_id === serviceId)
-      .sort((a, b) => b.payment_date.localeCompare(a.payment_date));
-    return rows[0] ?? null;
-  }
-  const supabase = await sb();
-  const { data } = await supabase
-    .from("payments")
-    .select("*")
-    .eq("service_id", serviceId)
-    .order("payment_date", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-  return (data as Payment) ?? null;
-}
-
 /**
- * Avanza el ancla de un servicio SOLO si sigue valiendo lo que esperábamos
- * (compare-and-swap). Devuelve false si otro ya la movió: eso es lo que impide
- * que dos pestañas confirmen el mismo ciclo dos veces.
+ * ¿Este error significa "falta correr la migración" y no "algo salió mal"?
+ *
+ * Hay que mirar dos familias de códigos, y la diferencia se paga caro: Postgres
+ * avisa de una COLUMNA faltante con 42703 ("column x does not exist"), pero de
+ * una TABLA faltante avisa PostgREST, con su propio código PGRST205 y el
+ * mensaje "Could not find the table ... in the schema cache" — nunca 42P01.
+ * Buscando solo los códigos de Postgres, una tabla que no existe se leería como
+ * error transitorio, la app se daría por migrada y el usuario recibiría el
+ * error crudo de la base en vez del cartel que le dice qué SQL correr.
  */
-export async function advanceServiceRenewal(
-  id: string,
-  expected: string,
-  next: string | null
-): Promise<boolean> {
-  if (IS_DEMO) {
-    const s = demoDb().services.find((x) => x.id === id);
-    if (!s || s.next_renewal_date !== expected) return false;
-    s.next_renewal_date = next;
-    s.updated_at = nowIso();
-    return true;
-  }
-  const supabase = await sb();
-  const { data, error } = await supabase
-    .from("services")
-    .update({ next_renewal_date: next })
-    .eq("id", id)
-    .eq("next_renewal_date", expected)
-    .select("id");
-  return !error && (data?.length ?? 0) === 1;
-}
-
-/** Crea el pago de un ciclo confirmado. `cycle_date` es el árbitro de duplicados. */
-export async function createCyclePayment(
-  input: PaymentInput,
-  cycleDate: string,
-  userId: string | null
-): Promise<{ id?: string; error?: string; duplicate?: boolean }> {
-  if (IS_DEMO) {
-    const db = demoDb();
-    if (db.payments.some((p) => p.service_id === input.service_id && p.cycle_date === cycleDate)) {
-      return { duplicate: true, error: "Ese ciclo ya estaba confirmado." };
-    }
-    const id = newId("pay");
-    db.payments.push({
-      ...input,
-      id,
-      cycle_date: cycleDate,
-      paid_by: userId,
-      created_at: nowIso(),
-      updated_at: nowIso(),
-    });
-    return { id };
-  }
-
-  const migrado = await hasRecurrenceColumns();
-  const supabase = await sb();
-  const payload = migrado
-    ? { ...input, cycle_date: cycleDate, paid_by: userId }
-    : { ...input, paid_by: userId };
-  const { data, error } = await supabase.from("payments").insert(payload).select("id").single();
-
-  if (error) {
-    // 23505 = unique_violation contra payments_service_cycle_uniq
-    if (error.code === "23505") return { duplicate: true, error: "Ese ciclo ya estaba confirmado." };
-    return { error: error.message };
-  }
-  return { id: data.id };
-}
-
-/** Deja constancia de un ciclo omitido a propósito. */
-export async function recordCycleSkip(
-  serviceId: string,
-  cycleDate: string,
-  reason: string | null,
-  userId: string | null
-): Promise<void> {
-  if (IS_DEMO) {
-    const db = demoDb();
-    if (db.skips.some((s) => s.service_id === serviceId && s.cycle_date === cycleDate)) return;
-    db.skips.push({
-      id: newId("skip"),
-      service_id: serviceId,
-      cycle_date: cycleDate,
-      reason,
-      created_at: nowIso(),
-    });
-    return;
-  }
-  if (!(await hasRecurrenceColumns())) return; // sin migración solo se avanza el ancla
-  const supabase = await sb();
-  await supabase
-    .from("service_cycle_skips")
-    .upsert({ service_id: serviceId, cycle_date: cycleDate, reason, created_by: userId }, { onConflict: "service_id,cycle_date" });
-}
-
-/** Cambia el estado de un servicio (para "ya no lo usamos"). */
-export async function setServiceStatus(id: string, status: ServiceStatus): Promise<{ error?: string }> {
-  if (IS_DEMO) {
-    const s = demoDb().services.find((x) => x.id === id);
-    if (s) {
-      s.status = status;
-      s.updated_at = nowIso();
-    }
-    return {};
-  }
-  const supabase = await sb();
-  const { error } = await supabase.from("services").update({ status }).eq("id", id);
-  return { error: error?.message };
-}
-
-/** Guarda el día real de cobro (columna de la migración 0004). */
-export async function setServiceAnchorDay(id: string, day: number | null): Promise<void> {
-  if (IS_DEMO) {
-    const s = demoDb().services.find((x) => x.id === id);
-    if (s) s.billing_anchor_day = day;
-    return;
-  }
-  if (!(await hasRecurrenceColumns())) return;
-  const supabase = await sb();
-  await supabase.from("services").update({ billing_anchor_day: day }).eq("id", id);
+function esFaltaDeMigracion(error: { code?: string; message: string }): boolean {
+  return (
+    error.code === "42P01" || // relation does not exist (Postgres)
+    error.code === "42703" || // column does not exist (Postgres)
+    error.code === "PGRST205" || // tabla ausente del schema cache (PostgREST)
+    error.code === "PGRST204" || // columna ausente del schema cache (PostgREST)
+    /does not exist|schema cache/i.test(error.message)
+  );
 }
 
 // ============================================================
@@ -856,4 +593,466 @@ export async function getReceiptUrls(
   // Cualquier ruta sin respuesta queda como null
   filePaths.forEach((p) => (p in map ? null : (map[p] = null)));
   return map;
+}
+
+// ============================================================
+// RENDICIONES  (migración 0005)
+// ============================================================
+// Una rendición es un LOTE cerrado: los pagos que se le entregaron al contador
+// en una fecha concreta, con el período que realmente cubren, los totales
+// congelados y el PDF que se imprimió.
+//
+// `payments.rendido_at` se sigue escribiendo: es la marca "ya se presentó" que
+// leen el dashboard, los cargos recurrentes y el asistente. `rendicion_id` dice
+// además en qué entrega fue.
+
+// ¿Está corrida la migración 0005? Se sondea una vez, se cachea corto, y solo
+// el error "no existe" cuenta como "falta el SQL": un fallo de red no puede
+// degradar la app por 60 segundos.
+export async function hasRendicionesTable(): Promise<boolean> {
+  if (IS_DEMO) return true;
+  const g = globalThis as unknown as { __gestorRendicionesProbe?: MigrationProbe };
+  const cached = g.__gestorRendicionesProbe;
+  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.value;
+
+  const supabase = await sb();
+  const { error } = await supabase.from("rendiciones").select("id").limit(1);
+  if (!error) {
+    g.__gestorRendicionesProbe = { value: true, at: Date.now() };
+    return true;
+  }
+
+  if (esFaltaDeMigracion(error)) {
+    g.__gestorRendicionesProbe = { value: false, at: Date.now() };
+    console.warn("[gestorDIA] Falta correr supabase/migrations/0005_rendiciones.sql:", error.message);
+    return false;
+  }
+
+  console.warn("[gestorDIA] No se pudo sondear rendiciones:", error.message);
+  return true;
+}
+
+const PAGO_SELECT =
+  "*, category:categories(*), service:services(name), receipts(id, file_path, file_name, mime_type)";
+
+/**
+ * Todo lo que falta rendir, de cualquier período.
+ *
+ * A propósito NO filtra por mes: el gasto de enero cuya factura recién llegó en
+ * marzo tiene que seguir a la vista, si no se pierde. El recorte por mes es un
+ * filtro de la pantalla, no de la consulta.
+ */
+export async function listPendientesDeRendir(): Promise<Payment[]> {
+  if (IS_DEMO) {
+    return demoDb()
+      .payments.map(hydratePayment)
+      .filter((p) => !p.rendido_at)
+      .sort((a, b) => b.payment_date.localeCompare(a.payment_date));
+  }
+  const supabase = await sb();
+  const { data } = await supabase
+    .from("payments")
+    .select(PAGO_SELECT)
+    .is("rendido_at", null)
+    .order("payment_date", { ascending: false });
+  return (data ?? []) as unknown as Payment[];
+}
+
+// Totales de un conjunto de pagos, con el mismo criterio que la pantalla y el PDF
+function totalesDe(pagos: Pick<Payment, "amount" | "currency" | "exchange_rate">[]) {
+  const ars = pagos.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
+  const usd = pagos.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
+  return { ars: Math.round(ars * 100) / 100, usd: Math.round(usd * 100) / 100 };
+}
+
+export interface CrearRendicionInput {
+  ids: string[];
+  titulo: string | null;
+  notas: string | null;
+}
+
+export interface CrearRendicionResult {
+  error?: string;
+  /** null cuando falta la migración 0005: se marcaron los pagos, sin lote */
+  rendicion?: Rendicion | null;
+  /** Los pagos que EFECTIVAMENTE entraron (puede ser menos de los pedidos) */
+  payments: Payment[];
+  /** Pedidos que quedaron afuera por no estar pagados o ya estar rendidos */
+  descartados: number;
+}
+
+/**
+ * Cierra una rendición: crea el lote y le engancha los pagos.
+ *
+ * Los totales y el período NO vienen del cliente: se recalculan acá sobre los
+ * pagos que realmente se pudieron enganchar. Si el navegador tenía la lista
+ * desactualizada (alguien rindió lo mismo desde otra pantalla), el lote refleja
+ * lo que pasó, no lo que el cliente creía.
+ */
+export async function crearRendicion(
+  input: CrearRendicionInput,
+  userId: string | null
+): Promise<CrearRendicionResult> {
+  const ids = [...new Set(input.ids)];
+  if (ids.length === 0) return { error: "No hay pagos para rendir.", payments: [], descartados: 0 };
+
+  const presentada_at = nowIso();
+
+  if (IS_DEMO) {
+    const db = demoDb();
+    const elegibles = db.payments.filter((p) => ids.includes(p.id) && p.status === "paid" && !p.rendido_at);
+    if (elegibles.length === 0) {
+      return { error: "Esos pagos ya estaban rendidos o no están confirmados.", payments: [], descartados: ids.length };
+    }
+    const { ars, usd } = totalesDe(elegibles);
+    const fechas = elegibles.map((p) => p.payment_date).sort();
+    const rendicion: Rendicion = {
+      id: newId("ren"),
+      numero: db.rendiciones.reduce((a, r) => Math.max(a, r.numero), 0) + 1,
+      titulo: input.titulo,
+      notas: input.notas,
+      periodo_desde: fechas[0],
+      periodo_hasta: fechas[fechas.length - 1],
+      cantidad: elegibles.length,
+      total_ars: ars,
+      total_usd: usd,
+      pdf_path: null,
+      presentada_at,
+      created_by: userId,
+      created_at: presentada_at,
+    };
+    db.rendiciones.push(rendicion);
+    elegibles.forEach((p) => {
+      p.rendido_at = presentada_at;
+      p.rendicion_id = rendicion.id;
+    });
+    return {
+      rendicion,
+      payments: elegibles.map(hydratePayment),
+      descartados: ids.length - elegibles.length,
+    };
+  }
+
+  const supabase = await sb();
+  const migrado = await hasRendicionesTable();
+
+  // Modo degradado (falta la 0005): se marcan los pagos como antes. Sin lote no
+  // hay historial ni PDF archivado, pero la app no se rompe.
+  if (!migrado) {
+    const r = await setPaymentsRendido(ids, true);
+    if (r.error) return { error: r.error, payments: [], descartados: 0 };
+    const { data } = await supabase.from("payments").select(PAGO_SELECT).in("id", ids);
+    return {
+      rendicion: null,
+      payments: (data ?? []) as unknown as Payment[],
+      descartados: ids.length - r.updated,
+    };
+  }
+
+  // 1) Qué se puede rendir de verdad, leído del servidor
+  const { data: candidatos, error: errLeer } = await supabase
+    .from("payments")
+    .select(PAGO_SELECT)
+    .in("id", ids)
+    .eq("status", "paid")
+    .is("rendido_at", null);
+  if (errLeer) return { error: errLeer.message, payments: [], descartados: 0 };
+
+  const elegibles = (candidatos ?? []) as unknown as Payment[];
+  if (elegibles.length === 0) {
+    return { error: "Esos pagos ya estaban rendidos o no están confirmados.", payments: [], descartados: ids.length };
+  }
+
+  // 2) El lote, con los totales de lo que se leyó
+  const { ars, usd } = totalesDe(elegibles);
+  const fechas = elegibles.map((p) => p.payment_date).sort();
+  const { data: creada, error: errCrear } = await supabase
+    .from("rendiciones")
+    .insert({
+      titulo: input.titulo,
+      notas: input.notas,
+      periodo_desde: fechas[0],
+      periodo_hasta: fechas[fechas.length - 1],
+      cantidad: elegibles.length,
+      total_ars: ars,
+      total_usd: usd,
+      presentada_at,
+      created_by: userId,
+    })
+    .select("*")
+    .single();
+  if (errCrear || !creada) {
+    return { error: errCrear?.message ?? "No se pudo crear la rendición.", payments: [], descartados: 0 };
+  }
+
+  const rendicion = creada as Rendicion;
+
+  // 3) Enganchar los pagos. El filtro por rendido_at nulo es la carrera real: si
+  //    entre el paso 1 y este alguien rindió el mismo pago desde otra pestaña,
+  //    acá queda afuera en vez de quedar en dos lotes a la vez.
+  const enganchados: string[] = [];
+  const CHUNK = 100;
+  const idsElegibles = elegibles.map((p) => p.id);
+  for (let i = 0; i < idsElegibles.length; i += CHUNK) {
+    const slice = idsElegibles.slice(i, i + CHUNK);
+    const { data, error } = await supabase
+      .from("payments")
+      .update({ rendido_at: presentada_at, rendicion_id: rendicion.id })
+      .in("id", slice)
+      .is("rendido_at", null)
+      .select("id");
+    if (error) {
+      // Deshacer lo hecho: un lote a medias es peor que ninguno
+      await supabase.from("payments").update({ rendido_at: null, rendicion_id: null }).eq("rendicion_id", rendicion.id);
+      await supabase.from("rendiciones").delete().eq("id", rendicion.id);
+      return { error: error.message, payments: [], descartados: 0 };
+    }
+    enganchados.push(...(data ?? []).map((r: { id: string }) => r.id));
+  }
+
+  if (enganchados.length === 0) {
+    await supabase.from("rendiciones").delete().eq("id", rendicion.id);
+    return {
+      error: "Esos pagos se rindieron desde otro lado mientras armabas este PDF.",
+      payments: [],
+      descartados: ids.length,
+    };
+  }
+
+  // 4) Si se enganchó menos de lo leído, el lote tiene que decir la verdad
+  const finales = elegibles.filter((p) => enganchados.includes(p.id));
+  if (finales.length !== elegibles.length) {
+    const t = totalesDe(finales);
+    const f = finales.map((p) => p.payment_date).sort();
+    const { data: ajustada } = await supabase
+      .from("rendiciones")
+      .update({
+        cantidad: finales.length,
+        total_ars: t.ars,
+        total_usd: t.usd,
+        periodo_desde: f[0],
+        periodo_hasta: f[f.length - 1],
+      })
+      .eq("id", rendicion.id)
+      .select("*")
+      .single();
+    if (ajustada) Object.assign(rendicion, ajustada as Rendicion);
+  }
+
+  return { rendicion, payments: finales, descartados: ids.length - finales.length };
+}
+
+export async function listRendiciones(): Promise<Rendicion[]> {
+  if (IS_DEMO) {
+    return [...demoDb().rendiciones].sort((a, b) => b.presentada_at.localeCompare(a.presentada_at));
+  }
+  if (!(await hasRendicionesTable())) return [];
+  const supabase = await sb();
+  const { data } = await supabase.from("rendiciones").select("*").order("presentada_at", { ascending: false });
+  return (data ?? []) as Rendicion[];
+}
+
+export async function getRendicion(id: string): Promise<(Rendicion & { payments: Payment[] }) | null> {
+  if (IS_DEMO) {
+    const db = demoDb();
+    const r = db.rendiciones.find((x) => x.id === id);
+    if (!r) return null;
+    const payments = db.payments
+      .filter((p) => p.rendicion_id === id)
+      .map(hydratePayment)
+      .sort((a, b) => a.payment_date.localeCompare(b.payment_date));
+    return { ...r, payments };
+  }
+  if (!(await hasRendicionesTable())) return null;
+  const supabase = await sb();
+  const [{ data: cab }, { data: pagos }] = await Promise.all([
+    supabase.from("rendiciones").select("*").eq("id", id).maybeSingle(),
+    supabase.from("payments").select(PAGO_SELECT).eq("rendicion_id", id).order("payment_date", { ascending: true }),
+  ]);
+  if (!cab) return null;
+  return { ...(cab as Rendicion), payments: (pagos ?? []) as unknown as Payment[] };
+}
+
+export async function updateRendicion(
+  id: string,
+  campos: { titulo?: string | null; notas?: string | null }
+): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const r = demoDb().rendiciones.find((x) => x.id === id);
+    if (r) Object.assign(r, campos);
+    return {};
+  }
+  const supabase = await sb();
+  const { error } = await supabase.from("rendiciones").update(campos).eq("id", id);
+  return { error: error?.message };
+}
+
+/**
+ * Reabre una rendición: sus pagos vuelven a pendientes y el lote desaparece
+ * (junto con el PDF archivado, que ya no documenta nada).
+ */
+export async function reabrirRendicion(id: string): Promise<{ error?: string; liberados: number }> {
+  if (IS_DEMO) {
+    const db = demoDb();
+    let liberados = 0;
+    db.payments.forEach((p) => {
+      if (p.rendicion_id === id) {
+        p.rendicion_id = null;
+        p.rendido_at = null;
+        liberados++;
+      }
+    });
+    db.rendiciones = db.rendiciones.filter((r) => r.id !== id);
+    return { liberados };
+  }
+  const supabase = await sb();
+  const { data: cab } = await supabase.from("rendiciones").select("pdf_path").eq("id", id).maybeSingle();
+
+  const { data, error } = await supabase
+    .from("payments")
+    .update({ rendido_at: null, rendicion_id: null })
+    .eq("rendicion_id", id)
+    .select("id");
+  if (error) return { error: error.message, liberados: 0 };
+
+  const path = (cab as { pdf_path: string | null } | null)?.pdf_path;
+  if (path) await supabase.storage.from("rendiciones").remove([path]);
+  const { error: errBorrar } = await supabase.from("rendiciones").delete().eq("id", id);
+  if (errBorrar) return { error: errBorrar.message, liberados: data?.length ?? 0 };
+  return { liberados: data?.length ?? 0 };
+}
+
+/** Saca UN pago de una rendición ya cerrada (se coló, o el contador lo rebotó). */
+export async function quitarDeRendicion(paymentId: string): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const p = demoDb().payments.find((x) => x.id === paymentId);
+    if (!p) return {};
+    const rid = p.rendicion_id;
+    p.rendicion_id = null;
+    p.rendido_at = null;
+    if (rid) recalcularDemo(rid);
+    return {};
+  }
+  const supabase = await sb();
+  const { data: pago } = await supabase.from("payments").select("rendicion_id").eq("id", paymentId).maybeSingle();
+  const { error } = await supabase
+    .from("payments")
+    .update({ rendido_at: null, rendicion_id: null })
+    .eq("id", paymentId);
+  if (error) return { error: error.message };
+  const rid = (pago as { rendicion_id: string | null } | null)?.rendicion_id;
+  if (rid) await recalcularRendicion(rid);
+  return {};
+}
+
+// Vuelve a calcular cabecera y totales de un lote a partir de los pagos que le
+// quedan. Los totales están congelados a propósito, pero si se saca un pago
+// dejarían de cuadrar con el detalle: ahí sí hay que recalcular.
+async function recalcularRendicion(id: string): Promise<void> {
+  const supabase = await sb();
+  const { data } = await supabase
+    .from("payments")
+    .select("amount, currency, exchange_rate, payment_date")
+    .eq("rendicion_id", id);
+  const pagos = (data ?? []) as Pick<Payment, "amount" | "currency" | "exchange_rate" | "payment_date">[];
+  if (pagos.length === 0) {
+    const { data: cab } = await supabase.from("rendiciones").select("pdf_path").eq("id", id).maybeSingle();
+    const path = (cab as { pdf_path: string | null } | null)?.pdf_path;
+    if (path) await supabase.storage.from("rendiciones").remove([path]);
+    await supabase.from("rendiciones").delete().eq("id", id);
+    return;
+  }
+  const { ars, usd } = totalesDe(pagos);
+  const fechas = pagos.map((p) => p.payment_date).sort();
+  await supabase
+    .from("rendiciones")
+    .update({
+      cantidad: pagos.length,
+      total_ars: ars,
+      total_usd: usd,
+      periodo_desde: fechas[0],
+      periodo_hasta: fechas[fechas.length - 1],
+    })
+    .eq("id", id);
+}
+
+function recalcularDemo(id: string): void {
+  const db = demoDb();
+  const r = db.rendiciones.find((x) => x.id === id);
+  if (!r) return;
+  const pagos = db.payments.filter((p) => p.rendicion_id === id);
+  if (pagos.length === 0) {
+    db.rendiciones = db.rendiciones.filter((x) => x.id !== id);
+    return;
+  }
+  const { ars, usd } = totalesDe(pagos);
+  const fechas = pagos.map((p) => p.payment_date).sort();
+  Object.assign(r, {
+    cantidad: pagos.length,
+    total_ars: ars,
+    total_usd: usd,
+    periodo_desde: fechas[0],
+    periodo_hasta: fechas[fechas.length - 1],
+  });
+}
+
+// ---------- El PDF archivado ----------
+/** Deja registrada la ruta del PDF que se subió al bucket. */
+export async function setRendicionPdfPath(id: string, path: string): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const r = demoDb().rendiciones.find((x) => x.id === id);
+    if (r) r.pdf_path = path;
+    return {};
+  }
+  const supabase = await sb();
+  const { error } = await supabase.from("rendiciones").update({ pdf_path: path }).eq("id", id);
+  return { error: error?.message };
+}
+
+/** URL firmada del PDF archivado (1 hora). */
+export async function getRendicionPdfUrl(path: string, expiresInSeconds = 60 * 60): Promise<string | null> {
+  if (IS_DEMO) return null;
+  const supabase = await sb();
+  const { data } = await supabase.storage
+    .from("rendiciones")
+    .createSignedUrl(path, expiresInSeconds, { download: true });
+  return data?.signedUrl ?? null;
+}
+
+// ---------- Completar datos fiscales sin salir de la rendición ----------
+export interface DatosFiscales {
+  provider: string | null;
+  provider_tax_id: string | null;
+  receipt_type: ReceiptType;
+  receipt_number: string | null;
+  exchange_rate: number | null;
+}
+
+/**
+ * Actualiza SOLO los campos de rendición de un pago. Existe aparte de
+ * updatePayment porque el circuito real es "el contador pide las facturas y las
+ * cargo de a diez": abrir la ficha completa de cada pago para tipear un número
+ * de factura es justo la fricción que hace que no se carguen.
+ */
+export async function actualizarDatosFiscales(
+  id: string,
+  campos: DatosFiscales
+): Promise<{ error?: string }> {
+  if (IS_DEMO) {
+    const p = demoDb().payments.find((x) => x.id === id);
+    if (p) {
+      Object.assign(p, campos, { updated_at: nowIso() });
+      p.amount_ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
+    }
+    return {};
+  }
+  const supabase = await sb();
+  const { data: pago } = await supabase.from("payments").select("amount, currency").eq("id", id).maybeSingle();
+  const patch: DatosFiscales & { amount_ars: number | null } = { ...campos, amount_ars: null };
+  if (pago) {
+    const { amount, currency } = pago as { amount: number; currency: CurrencyCode };
+    patch.amount_ars = toARS(Number(amount), currency, campos.exchange_rate);
+  }
+  const { error } = await supabase.from("payments").update(patch).eq("id", id);
+  return { error: error?.message };
 }

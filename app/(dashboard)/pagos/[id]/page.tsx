@@ -95,6 +95,13 @@ export default async function PagoDetallePage({
           <Link href={`/pagos/${id}?editar=1`} className="btn btn-primary">
             ✏️ Editar
           </Link>
+          <Link
+            href={`/pagos/nuevo?repetir=${id}`}
+            className="btn btn-ghost"
+            title="Abre un pago nuevo con estos mismos datos y la fecha de hoy"
+          >
+            ↻ Repetir este gasto
+          </Link>
           <form action={boundDelete}>
             <button type="submit" className="btn btn-ghost" style={{ color: "#f87171", borderColor: "#f8717155" }}>
               Eliminar

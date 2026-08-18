@@ -1,8 +1,13 @@
 "use client";
 
-import { useActionState, useState } from "react";
+// Alta/edición de un servicio. Un servicio es solo un AGRUPADOR de pagos: no
+// tiene ciclo de facturación, ni monto esperado, ni fecha de renovación. El
+// gasto real cambia todos los meses, así que esos campos proponían siempre el
+// número equivocado; ahora cada pago se carga cuando se paga.
+
+import { useActionState } from "react";
 import Link from "next/link";
-import type { BillingCycle, Category, Service } from "@/lib/types";
+import type { Category, Service } from "@/lib/types";
 
 type FormState = { error?: string; success?: string };
 type Action = (prev: unknown, formData: FormData) => Promise<FormState>;
@@ -12,19 +17,13 @@ export default function ServiceForm({
   categories,
   service,
   submitLabel = "Guardar servicio",
-  cargosPendientes = 0,
 }: {
   action: Action;
   categories: Category[];
   service?: Service;
   submitLabel?: string;
-  /** Cargos de este servicio esperando confirmación (se pierden si se adelanta la fecha) */
-  cargosPendientes?: number;
 }) {
   const [state, formAction, pending] = useActionState(action, {});
-  const [cycle, setCycle] = useState<BillingCycle>(service?.billing_cycle ?? "monthly");
-  // Recarga a demanda (créditos tipo OpenRouter): sin fecha de cobro ni alertas
-  const isOnDemand = cycle === "on_demand";
 
   return (
     <form action={formAction} style={{ display: "grid", gap: "1.1rem" }}>
@@ -46,86 +45,18 @@ export default function ServiceForm({
         <input name="url" type="url" className="input" placeholder="https://…" defaultValue={service?.url ?? ""} />
       </Field>
 
-      <div style={grid3}>
-        <Field label="¿Cómo se factura?">
-          <select
-            name="billing_cycle"
-            className="select"
-            value={cycle}
-            onChange={(e) => setCycle(e.target.value as BillingCycle)}
-          >
-            <option value="monthly">Mensual</option>
-            <option value="yearly">Anual</option>
-            <option value="quarterly">Trimestral</option>
-            <option value="weekly">Semanal</option>
-            <option value="on_demand">Recarga a demanda (créditos)</option>
-            <option value="one_time">Único</option>
-            <option value="custom">Personalizado</option>
+      <div style={grid2}>
+        <Field label="Estado">
+          <select name="status" className="select" defaultValue={service?.status ?? "active"}>
+            <option value="active">Activa</option>
+            <option value="paused">En pausa</option>
+            <option value="cancelled">Cancelada</option>
           </select>
-        </Field>
-        <Field label={isOnDemand ? "Monto habitual de recarga (opcional)" : "Monto esperado"}>
-          <input name="expected_amount" className="input" inputMode="decimal" placeholder="0.00" defaultValue={service?.expected_amount ?? ""} />
-        </Field>
-        <Field label="Moneda">
-          <select name="currency" className="select" defaultValue={service?.currency ?? "USD"}>
-            <option value="USD">USD</option>
-            <option value="ARS">ARS</option>
-            <option value="EUR">EUR</option>
-          </select>
+          <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+            Dar de baja no borra nada: el historial de pagos se conserva.
+          </span>
         </Field>
       </div>
-
-      {isOnDemand ? (
-        <>
-          <p style={{ fontSize: "0.82rem", color: "var(--text-muted)", background: "rgba(255,255,255,0.03)", border: "1px solid var(--glass-border)", borderRadius: 10, padding: "0.7rem 0.9rem", margin: 0 }}>
-            💡 Recarga a demanda: sin fecha de cobro ni alertas. Cada vez que carguen créditos,
-            registran un pago vinculado a este servicio y acá se acumula el historial y el total gastado.
-          </p>
-          <div style={grid2}>
-            <Field label="Estado">
-              <select name="status" className="select" defaultValue={service?.status ?? "active"}>
-                <option value="active">Activa</option>
-                <option value="paused">En pausa</option>
-                <option value="cancelled">Cancelada</option>
-              </select>
-            </Field>
-          </div>
-        </>
-      ) : (
-        <>
-          <div style={grid2}>
-            <Field label="Próxima fecha de cobro">
-              <input name="next_renewal_date" type="date" className="input" defaultValue={service?.next_renewal_date ?? ""} />
-              {cargosPendientes > 0 && (
-                <span style={{ fontSize: "0.75rem", color: "#fbbf24" }}>
-                  ⚠ Hay {cargosPendientes} cargo{cargosPendientes === 1 ? "" : "s"} sin confirmar desde esta
-                  fecha. Si la adelantás, esos períodos dejan de proponerse y no se pueden recuperar.
-                </span>
-              )}
-              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                Es el próximo cobro que todavía no se registró. Cada vez que confirmes uno, avanza sola.
-              </span>
-            </Field>
-            <Field label="Estado">
-              <select name="status" className="select" defaultValue={service?.status ?? "active"}>
-                <option value="active">Activa</option>
-                <option value="paused">En pausa</option>
-                <option value="cancelled">Cancelada</option>
-              </select>
-            </Field>
-          </div>
-
-          <Field label="¿Cómo se cobra?">
-            <select name="payment_mode" className="select" defaultValue={service?.payment_mode ?? "automatic"}>
-              <option value="automatic">Débito automático — se cobra solo de la tarjeta</option>
-              <option value="manual">Pago manual — necesito una alerta para acordarme de pagarlo</option>
-            </select>
-            <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-              Los de pago manual aparecen destacados en el dashboard cuando se acerca la fecha.
-            </span>
-          </Field>
-        </>
-      )}
 
       <Field label="Descripción / notas">
         <textarea name="description" className="textarea" rows={2} defaultValue={service?.description ?? ""} />
@@ -145,7 +76,6 @@ export default function ServiceForm({
 }
 
 const grid2: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem" };
-const grid3: React.CSSProperties = { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: "1rem" };
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (

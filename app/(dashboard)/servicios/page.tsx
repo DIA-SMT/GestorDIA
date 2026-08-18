@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { listServices, servicePaidTotals } from "@/lib/data";
-import { formatMoney, formatDate, daysUntil, effectiveRenewal, anchorDayOf } from "@/lib/utils";
+import { formatMoney } from "@/lib/utils";
 import { ServiceStatusBadge, CategoryTag } from "@/components/badges";
-import { BILLING_CYCLE_LABELS } from "@/lib/types";
 
 export default async function ServiciosPage() {
   const [services, spendByService] = await Promise.all([listServices(), servicePaidTotals()]);
@@ -14,7 +13,8 @@ export default async function ServiciosPage() {
         <div>
           <h1 style={{ fontSize: "1.9rem", fontWeight: 700 }}>Servicios</h1>
           <p style={{ color: "var(--text-muted)", fontSize: "0.85rem", marginTop: "0.2rem" }}>
-            {active.length} activos de {services.length} totales
+            Agrupan los pagos para ver el historial y el total gastado en cada uno · {active.length} activos de{" "}
+            {services.length}
           </p>
         </div>
         <Link href="/servicios/nuevo" className="btn btn-primary">+ Nuevo servicio</Link>
@@ -26,19 +26,35 @@ export default async function ServiciosPage() {
           <Link href="/servicios/nuevo" style={{ color: "var(--primary)" }}>Creá el primero.</Link>
         </div>
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "1.25rem" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "1.25rem" }}>
           {services.map((s) => {
-            const renewalDate = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
-            const d = daysUntil(renewalDate);
             const spend = spendByService[s.id] ?? [];
             return (
-              <Link key={s.id} href={`/servicios/${s.id}`} className="card" style={{ padding: "1.5rem", display: "grid", gap: "0.85rem", opacity: s.status === "cancelled" ? 0.6 : 1 }}>
+              <Link
+                key={s.id}
+                href={`/servicios/${s.id}`}
+                className="card"
+                style={{ padding: "1.5rem", display: "grid", gap: "0.85rem", opacity: s.status === "cancelled" ? 0.6 : 1 }}
+              >
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", gap: "0.5rem" }}>
                   <span style={{ fontWeight: 600, fontSize: "1.02rem" }}>{s.name}</span>
                   <ServiceStatusBadge status={s.status} />
                 </div>
                 {s.category && <div><CategoryTag name={s.category.name} color={s.category.color} /></div>}
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", fontSize: "0.85rem", gap: "0.5rem" }}>
+                {s.description && (
+                  <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", margin: 0 }}>{s.description}</p>
+                )}
+                <div
+                  style={{
+                    borderTop: "1px solid var(--glass-border)",
+                    paddingTop: "0.7rem",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "baseline",
+                    fontSize: "0.85rem",
+                    gap: "0.5rem",
+                  }}
+                >
                   <span style={{ color: "var(--text-muted)" }}>Gastado</span>
                   {spend.length > 0 ? (
                     <span style={{ fontWeight: 600, textAlign: "right" }}>
@@ -46,52 +62,6 @@ export default async function ServiciosPage() {
                     </span>
                   ) : (
                     <span style={{ color: "var(--text-faint)" }}>Sin pagos aún</span>
-                  )}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", fontSize: "0.78rem", color: "var(--text-faint)" }}>
-                  <span>{BILLING_CYCLE_LABELS[s.billing_cycle]}</span>
-                  {s.expected_amount != null && (
-                    <span>Estimado: {formatMoney(s.expected_amount, s.currency)}</span>
-                  )}
-                </div>
-                <div>
-                  <span
-                    className="badge"
-                    style={
-                      s.billing_cycle === "on_demand"
-                        ? { background: "rgba(103,232,249,.1)", color: "#67e8f9", border: "1px solid rgba(103,232,249,.2)" }
-                        : s.payment_mode === "manual"
-                        ? { background: "rgba(251,191,36,.12)", color: "#fbbf24", border: "1px solid rgba(251,191,36,.25)" }
-                        : { background: "rgba(148,163,184,.1)", color: "var(--text-muted)" }
-                    }
-                  >
-                    {s.billing_cycle === "on_demand"
-                      ? "⚡ Créditos — se carga a demanda"
-                      : s.payment_mode === "manual"
-                      ? "✋ Pago manual — con alerta"
-                      : "🔄 Débito automático"}
-                  </span>
-                </div>
-                <div style={{ borderTop: "1px solid var(--glass-border)", paddingTop: "0.6rem", fontSize: "0.8rem", color: "var(--text-muted)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span>
-                    {s.billing_cycle === "on_demand"
-                      ? "Sin fecha fija de cobro"
-                      : d !== null && d < 0 && s.payment_mode !== "manual"
-                      ? "Último cobro:"
-                      : "Renueva:"}{" "}
-                    {s.billing_cycle !== "on_demand" && formatDate(renewalDate)}
-                  </span>
-                  {s.billing_cycle !== "on_demand" && s.status === "active" && d !== null && d <= 30 && (
-                    d < 0 && s.payment_mode !== "manual" ? (
-                      // Cobro único automático ya debitado: no es un vencimiento
-                      <span className="badge" style={{ background: "rgba(148,163,184,.12)", color: "var(--text-muted)" }}>
-                        Ya se cobró
-                      </span>
-                    ) : (
-                      <span className="badge" style={{ background: d <= 3 ? "rgba(239,68,68,.15)" : "rgba(245,158,11,.15)", color: d <= 3 ? "#f87171" : "#fbbf24" }}>
-                        {d < 0 ? `Vencido ${-d}d` : d === 0 ? "Hoy" : `${d}d`}
-                      </span>
-                    )
                   )}
                 </div>
               </Link>

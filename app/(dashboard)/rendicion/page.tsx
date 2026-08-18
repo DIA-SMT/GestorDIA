@@ -1,52 +1,46 @@
-import { listPaymentsBetween, listCategories } from "@/lib/data";
-import { loadPendingCharges } from "@/lib/pending";
-import { formatMoney, toARS, todayISO } from "@/lib/utils";
-import RendicionTable from "@/components/rendicion-table";
-import PendingCharges from "@/components/pending-charges";
+// Armado de la rendición: lo que todavía no se le entregó al contador.
+//
+// La pantalla ya no se organiza por mes calendario. El eje es "lo pendiente",
+// venga del período que venga: los gastos se anotan cuando se pagan y las
+// facturas llegan semanas después, así que un mes cerrado no significa nada.
+// Lo ya entregado vive en /rendicion/historial, como lotes cerrados.
+
+import Link from "next/link";
+import {
+  listPendientesDeRendir,
+  listCategories,
+  listRendiciones,
+  hasRendicionesTable,
+} from "@/lib/data";
+import { formatMoney, toARS, todayISO, formatDate, toLocalDay } from "@/lib/utils";
+import { resumirPreparacion } from "@/lib/rendicion-status";
+import RendicionArmar from "@/components/rendicion-armar";
 import type { Payment } from "@/lib/types";
 
-function nextMonth(mes: string): string {
-  const [y, m] = mes.split("-").map(Number);
-  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
-}
-
-function monthLabel(mes: string): string {
-  const [y, m] = mes.split("-").map(Number);
-  const d = new Date(y, m - 1, 1);
-  return new Intl.DateTimeFormat("es-AR", { month: "long", year: "numeric" }).format(d);
-}
-
-export default async function RendicionPage({
-  searchParams,
-}: {
-  searchParams: Promise<{ mes?: string }>;
-}) {
-  const sp = await searchParams;
-  const currentMonth = todayISO().slice(0, 7);
-  const mes = /^\d{4}-\d{2}$/.test(sp.mes ?? "") ? sp.mes! : currentMonth;
-
-  const start = `${mes}-01`;
-  const end = `${nextMonth(mes)}-01`;
-
-  const [payments, categories, pending] = await Promise.all([
-    listPaymentsBetween(start, end),
+export default async function RendicionPage() {
+  const [pendientes, categories, rendiciones, migrado] = await Promise.all([
+    listPendientesDeRendir(),
     listCategories(),
-    loadPendingCharges(),
+    listRendiciones(),
+    hasRendicionesTable(),
   ]);
-  const rows = payments as (Payment & { receipts?: { id: string }[] })[];
 
-  const paid = rows.filter((p) => p.status === "paid");
-  const totalARS = paid.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
-  const totalUSD = paid.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
-  // Solo los confirmados se pueden rendir: un pago pendiente o fallido no cuenta
-  const pendientes = paid.filter((p) => !p.rendido_at).length;
-  const conRecibo = rows.filter((p) => (p.receipts?.length ?? 0) > 0).length;
+  const rows = pendientes as (Payment & { receipts?: { id: string }[] })[];
+  const rendibles = rows.filter((p) => p.status === "paid");
 
-  // Cargos recurrentes de ESTE mes que todavía no se confirmaron: si se rinde
-  // sin resolverlos, el mes le llega incompleto al contador.
-  const delMes = pending.groups
-    .map((g) => ({ ...g, charges: g.charges.filter((c) => c.cycleDate.slice(0, 7) === mes) }))
-    .filter((g) => g.charges.length > 0);
+  const totalARS = rendibles.reduce((a, p) => a + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0), 0);
+  const totalUSD = rendibles.filter((p) => p.currency === "USD").reduce((a, p) => a + Number(p.amount), 0);
+  const prep = resumirPreparacion(rendibles);
+
+  // Lo más viejo sin rendir: si hay algo de hace meses, es lo que hay que mirar
+  const masViejo = rendibles.reduce<string | null>(
+    (min, p) => (min === null || p.payment_date < min ? p.payment_date : min),
+    null
+  );
+  const mesActual = todayISO().slice(0, 7);
+  const arrastres = rendibles.filter((p) => p.payment_date.slice(0, 7) < mesActual).length;
+
+  const ultima = rendiciones[0];
 
   return (
     <div style={{ display: "grid", gap: "2rem" }}>
@@ -54,56 +48,71 @@ export default async function RendicionPage({
         <div>
           <h1 style={{ fontSize: "1.9rem", fontWeight: 700 }}>Rendición de cuentas</h1>
           <p className="muted" style={{ fontSize: "0.88rem", marginTop: "0.25rem" }}>
-            Detalle de <strong style={{ color: "var(--text)", textTransform: "capitalize" }}>{monthLabel(mes)}</strong> para presentar al contador.
+            Elegí qué gastos le entregás al contador y generá el comprobante. Todo lo pendiente está acá, sin importar
+            de qué mes sea.
           </p>
         </div>
-        <form style={{ display: "flex", gap: "0.5rem", alignItems: "end" }}>
-          <div>
-            <span className="label">Período</span>
-            <input type="month" name="mes" defaultValue={mes} className="input" style={{ width: "auto" }} />
-          </div>
-          <button type="submit" className="btn btn-ghost">Ver</button>
-        </form>
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          {ultima && (
+            <span className="muted" style={{ fontSize: "0.78rem" }}>
+              Última: N° {ultima.numero} · {formatDate(toLocalDay(ultima.presentada_at))}
+            </span>
+          )}
+          <Link href="/rendicion/historial" className="btn btn-ghost">
+            📁 Historial ({rendiciones.length})
+          </Link>
+        </div>
       </div>
 
-      {/* Totales */}
+      {/* Totales de lo que falta rendir */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(196px, 1fr))", gap: "1rem" }}>
         <Kpi
-          label="Total del período (ARS)"
+          label="Pendiente de rendir (ARS)"
           value={formatMoney(totalARS, "ARS")}
-          hint={`${paid.length} ${paid.length === 1 ? "pago confirmado" : "pagos confirmados"}`}
+          hint={`${rendibles.length} ${rendibles.length === 1 ? "pago confirmado" : "pagos confirmados"}`}
         />
-        <Kpi label="Total en USD" value={formatMoney(totalUSD, "USD")} hint="Pagos en dólares" />
-        <Kpi label="Pendientes de rendir" value={`${pendientes}/${paid.length}`} hint="Confirmados sin presentar" />
-        <Kpi label="Con recibo adjunto" value={`${conRecibo}/${rows.length}`} hint="Archivo cargado" />
+        <Kpi label="Pendiente en USD" value={formatMoney(totalUSD, "USD")} hint="Pagos en dólares" />
+        <Kpi
+          label="Listos para rendir"
+          value={`${prep.listos}/${prep.total}`}
+          hint={prep.sinDatos > 0 ? `${prep.sinDatos} sin factura cargada` : "Con todos los datos fiscales"}
+          alerta={prep.sinDatos > 0}
+        />
+        <Kpi
+          label="Arrastres"
+          value={String(arrastres)}
+          hint={
+            masViejo && arrastres > 0
+              ? `De meses anteriores. El más viejo: ${formatDate(masViejo)}`
+              : "Nada quedó de meses anteriores"
+          }
+          alerta={arrastres > 0}
+        />
       </div>
 
-      {/* Cargos del mes sin confirmar: resolverlos ANTES de armar el PDF */}
-      {delMes.length > 0 && (
-        <PendingCharges
-          groups={delMes}
-          migrado={pending.migrado}
-          titulo={`Falta confirmar de ${monthLabel(mes)}`}
-        />
-      )}
-
-      <RendicionTable payments={rows} categories={categories} mes={mes} mesLabel={monthLabel(mes)} />
+      <RendicionArmar payments={rows} categories={categories} migrado={migrado} />
 
       <p className="muted" style={{ fontSize: "0.8rem" }}>
-        Circuito: confirmá los cargos recurrentes del mes → revisá la lista → apretá
-        <strong style={{ color: "var(--text)" }}> “PDF para imprimir y rendir”</strong>. El PDF baja con
-        los recibos incrustados y esos pagos quedan marcados como presentados. Si querés mirarlo antes
-        sin cerrar nada, usá la vista previa.
+        Circuito: se anota el gasto cuando se paga → cuando el contador manda las facturas se completan los datos con el
+        lápiz de cada fila → se seleccionan los pagos y se aprieta{" "}
+        <strong style={{ color: "var(--text)" }}>“Rendir y generar comprobante”</strong>. Eso cierra una rendición
+        numerada, baja el PDF con las facturas incrustadas y archiva una copia. Todo queda en el{" "}
+        <Link href="/rendicion/historial" style={{ color: "var(--text)" }}>historial</Link>.
       </p>
     </div>
   );
 }
 
-function Kpi({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Kpi({ label, value, hint, alerta }: { label: string; value: string; hint?: string; alerta?: boolean }) {
   return (
     <div className="card" style={{ padding: "1.5rem" }}>
       <div style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>{label}</div>
-      <div className="font-display" style={{ fontSize: "1.5rem", fontWeight: 700, marginTop: "0.3rem" }}>{value}</div>
+      <div
+        className="font-display"
+        style={{ fontSize: "1.5rem", fontWeight: 700, marginTop: "0.3rem", color: alerta ? "#fbbf24" : undefined }}
+      >
+        {value}
+      </div>
       {hint && <div style={{ fontSize: "0.74rem", color: "var(--text-faint)", marginTop: "0.25rem" }}>{hint}</div>}
     </div>
   );

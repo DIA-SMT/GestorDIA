@@ -1,54 +1,58 @@
 import Link from "next/link";
-import { monthPaidPayments, listServices, recentPayments as fetchRecent } from "@/lib/data";
-import { loadPendingCharges } from "@/lib/pending";
-import { formatMoney, formatDate, daysUntil, effectiveRenewal, toARS, todayISO, anchorDayOf } from "@/lib/utils";
+import {
+  monthPaidPayments,
+  listServices,
+  listPendientesDeRendir,
+  listPaymentsBetween,
+  recentPayments as fetchRecent,
+} from "@/lib/data";
+import { formatMoney, formatDate, toARS, todayISO, monthLabel, prevMonth, claveDeGasto } from "@/lib/utils";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import KpiCards, { type KpiDef } from "@/components/kpi-cards";
-import PendingCharges from "@/components/pending-charges";
-import { BILLING_CYCLE_LABELS, type Payment, type Service } from "@/lib/types";
+import { resumirPreparacion } from "@/lib/rendicion-status";
+import type { Payment } from "@/lib/types";
 
-// Lo que se muestra depende de qué día es hoy (cargos vencidos, alertas). Sin
-// esto Next puede prerenderizar la página en el build con un "hoy" congelado.
+// Lo que se muestra depende de qué día es hoy. Sin esto Next puede
+// prerenderizar la página en el build con un "hoy" congelado.
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
-  const monthStart = `${todayISO().slice(0, 7)}-01`;
+  const mes = todayISO().slice(0, 7);
+  const monthStart = `${mes}-01`;
+  const anterior = prevMonth(mes);
 
-  const [monthPayments, allServices, recentPayments, pending] = await Promise.all([
+  const [monthPayments, services, recientes, pendientes, delMesPasado] = await Promise.all([
     monthPaidPayments(monthStart),
     listServices(),
     fetchRecent(8),
-    loadPendingCharges(),
+    listPendientesDeRendir(),
+    listPaymentsBetween(`${anterior}-01`, monthStart),
   ]);
 
-  const activeServices = allServices.filter(
-    (s) => s.status === "active" && s.next_renewal_date
-  );
-
   // Gasto del mes en ARS (suma de equivalentes)
-  const monthTotalARS = monthPayments.reduce((acc, p) => {
-    const ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
-    return acc + (ars ?? 0);
-  }, 0);
+  const monthTotalARS = monthPayments.reduce(
+    (acc, p) => acc + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0),
+    0
+  );
   const monthTotalUSD = monthPayments
     .filter((p) => p.currency === "USD")
     .reduce((acc, p) => acc + Number(p.amount), 0);
 
-  // Próximos vencimientos (30 días), separados por cómo se pagan:
-  // manual = lo tenés que pagar vos (alerta, incluye vencidos) /
-  // automatic = se debita solo (informativo, usa el próximo cobro futuro)
-  const withRenewal = activeServices.map((s) => {
-    const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
-    return { s, date, d: date == null ? null : daysUntil(date) };
-  });
-  // Solo los que TODAVÍA no vencieron: los vencidos ya aparecen arriba como
-  // cargos por confirmar, y ahí sí se pueden resolver de una.
-  const toPayManually = withRenewal.filter(
-    (r) => r.s.payment_mode === "manual" && r.d != null && r.d > 0 && r.d <= 30
+  const porRendir = pendientes.filter((p) => p.status === "paid");
+  const totalPorRendir = porRendir.reduce(
+    (acc, p) => acc + (toARS(Number(p.amount), p.currency, p.exchange_rate) ?? 0),
+    0
   );
-  const autoDebit = withRenewal.filter(
-    (r) => r.s.payment_mode !== "manual" && r.d != null && r.d >= 0 && r.d <= 30
-  );
+  const prep = resumirPreparacion(porRendir);
+  const arrastres = porRendir.filter((p) => p.payment_date.slice(0, 7) < mes).length;
+  const activos = services.filter((s) => s.status === "active");
+
+  // Gastos del mes pasado que todavía no se repitieron este mes. Como ahora
+  // cada gasto se carga a mano, esto es el recordatorio: "esto lo pagaste en
+  // julio y en agosto todavía no aparece". Se compara por proveedor+descripción,
+  // que es lo que identifica al gasto cuando el monto cambia todos los meses.
+  const yaCargados = new Set(monthPayments.map(claveDeGasto));
+  const sinRepetir = dedupe(delMesPasado.filter((p) => p.status === "paid" && !yaCargados.has(claveDeGasto(p))));
 
   return (
     <div style={{ display: "grid", gap: "2.25rem" }}>
@@ -59,9 +63,6 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      {/* Cargos recurrentes esperando el OK: lo primero que hay que resolver */}
-      <PendingCharges groups={pending.groups} migrado={pending.migrado} />
-
       {/* KPIs con detalle expandible para verificar los números */}
       <KpiCards
         kpis={[
@@ -69,7 +70,7 @@ export default async function DashboardPage() {
             key: "ars",
             label: "Gasto del mes (ARS)",
             value: formatMoney(monthTotalARS, "ARS"),
-            hint: `${monthPayments.length} pagos este mes`,
+            hint: `${monthPayments.length} pagos en ${monthLabel(mes)}`,
             note: "Suma de los pagos confirmados del mes, convertidos a ARS con la cotización cargada en cada pago. Los que no tienen cotización no entran en la suma.",
             rows: monthPayments.map((p) => paymentRow(p)),
           },
@@ -79,129 +80,81 @@ export default async function DashboardPage() {
             value: formatMoney(monthTotalUSD, "USD"),
             hint: "Solo pagos en dólares",
             note: "Suma de los pagos confirmados del mes hechos en dólares, en su monto original.",
-            rows: monthPayments.filter((p) => p.currency === "USD").map((p) => ({
-              ...paymentRow(p),
-              amount: formatMoney(Number(p.amount), "USD"),
-              warn: false,
-            })),
+            rows: monthPayments
+              .filter((p) => p.currency === "USD")
+              .map((p) => ({ ...paymentRow(p), amount: formatMoney(Number(p.amount), "USD"), warn: false })),
           },
           {
-            key: "porconfirmar",
-            label: "Cargos por confirmar",
-            value: String(pending.total),
-            hint: "Renovaciones esperando tu OK",
-            accent: pending.total > 0,
-            note: "Servicios recurrentes que ya renovaron y todavía no generaron el gasto. Confirmalos arriba para que entren en la rendición del mes.",
-            rows: pending.groups
-              .flatMap((g) => g.charges)
-              .map((c) => ({
-                id: c.key,
-                href: `/servicios/${c.serviceId}`,
-                title: c.serviceName,
-                meta: `${c.periodo} · cobro del ${formatDate(c.cycleDate)}`,
-                amount: c.amount != null ? formatMoney(c.amount, c.currency) : "sin monto",
-                warn: c.amount == null || !!c.duplicate,
-              })),
+            key: "rendir",
+            label: "Pendiente de rendir",
+            value: formatMoney(totalPorRendir, "ARS"),
+            hint: `${porRendir.length} ${porRendir.length === 1 ? "pago" : "pagos"}${
+              arrastres > 0 ? ` · ${arrastres} de meses anteriores` : ""
+            }`,
+            accent: arrastres > 0,
+            note: "Pagos confirmados que todavía no se le entregaron al contador, de cualquier período. Se arman en Rendición.",
+            rows: porRendir.map((p) => paymentRow(p)),
           },
           {
-            key: "manual",
-            label: "Para pagar vos",
-            value: String(toPayManually.length),
-            hint: "Pagos manuales en 30 días",
-            accent: toPayManually.length > 0,
-            note: "Servicios activos de pago manual que renuevan en los próximos 30 días. Los que ya vencieron aparecen arriba como cargos por confirmar.",
-            rows: toPayManually.map(({ s }) => serviceRow(s)),
+            key: "facturas",
+            label: "Sin factura cargada",
+            value: `${prep.sinDatos}`,
+            hint: prep.sinDatos > 0 ? "El contador los va a rebotar" : "Todo con su comprobante",
+            accent: prep.sinDatos > 0,
+            note: "Pagos pendientes de rendir a los que les falta el tipo de comprobante, el número o el archivo adjunto. Se completan desde Rendición, con el lápiz de cada fila.",
+            rows: porRendir.map((p) => paymentRow(p)),
           },
           {
-            key: "auto",
-            label: "Se debitan solos",
-            value: String(autoDebit.length),
-            hint: "Débitos automáticos en 30 días",
-            note: "Servicios activos con débito automático. Muestra el próximo cobro (los ya debitados se adelantan al siguiente).",
-            rows: autoDebit.map(({ s }) => serviceRow(s)),
+            key: "servicios",
+            label: "Servicios activos",
+            value: String(activos.length),
+            hint: `de ${services.length} cargados`,
+            note: "Los servicios agrupan pagos: sirven para ver el historial y el total gastado en cada uno.",
+            rows: activos.map((s) => ({ id: s.id, href: `/servicios/${s.id}`, title: s.name, meta: s.description ?? "", amount: "" })),
           },
         ] satisfies KpiDef[]}
       />
 
-      {/* ⚠ Alertas: pagos manuales que tenés que hacer vos */}
-      {toPayManually.length > 0 && (
-        <section
-          className="card"
-          style={{ padding: "1.75rem", borderColor: "rgba(251,191,36,.35)" }}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-            <h2 style={{ fontSize: "1.05rem", fontWeight: 600, color: "#fbbf24" }}>
-              ⚠ Tenés que pagarlos vos
+      {/* Gastos del mes pasado que todavía no se repitieron este mes */}
+      {sinRepetir.length > 0 && (
+        <section className="card" style={{ padding: "1.75rem" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", flexWrap: "wrap", gap: "0.5rem" }}>
+            <h2 style={{ fontSize: "1.05rem", fontWeight: 600 }}>
+              Pagaste esto en {monthLabel(anterior)} y todavía no en {monthLabel(mes)}
             </h2>
-            <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>
-              No se debitan solos — registrá el pago cuando lo hagas
-            </span>
+            <Link href="/pagos" style={{ fontSize: "0.85rem", color: "var(--primary)" }}>Ver pagos →</Link>
           </div>
+          <p className="muted" style={{ fontSize: "0.8rem", marginBottom: "1rem" }}>
+            No es una alerta: puede que este mes no corresponda. “Repetir” abre el formulario con los mismos datos y
+            la fecha de hoy, para que solo ajustes el monto.
+          </p>
           <div style={{ display: "grid", gap: "0.5rem" }}>
-            {toPayManually.map(({ s, date, d }) => {
-              const dd = d ?? 0;
-              return (
-                <div key={s.id} style={{ ...rowStyle, background: "rgba(251,191,36,.06)", border: "1px solid rgba(251,191,36,.15)" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
-                    <span style={{ fontWeight: 600 }}>{s.name}</span>
-                    {s.category && <CategoryTag name={s.category.name} color={s.category.color} />}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
-                    <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-                      {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
-                    </span>
-                    <span
-                      className="badge"
-                      style={{
-                        background: dd <= 3 ? "rgba(239,68,68,.18)" : "rgba(251,191,36,.15)",
-                        color: dd <= 3 ? "#f87171" : "#fbbf24",
-                      }}
-                    >
-                      {dd < 0 ? `Venció hace ${-dd}d` : dd === 0 ? "¡Vence hoy!" : `En ${dd} días`}
-                    </span>
-                    <Link href="/pagos/nuevo" className="btn btn-primary" style={{ padding: "0.35rem 0.75rem", fontSize: "0.8rem" }}>
-                      Ya lo pagué
-                    </Link>
-                  </div>
+            {sinRepetir.map((p) => (
+              <div key={p.id} style={rowStyle}>
+                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
+                  <Link href={`/pagos/${p.id}`} style={{ fontWeight: 500, color: "var(--text)" }}>
+                    {p.description || p.service?.name || p.provider || "Pago"}
+                  </Link>
+                  {p.category && <CategoryTag name={p.category.name} color={p.category.color} />}
                 </div>
-              );
-            })}
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                  <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{formatDate(p.payment_date)}</span>
+                  <span style={{ fontWeight: 600, minWidth: 90, textAlign: "right" }}>
+                    {formatMoney(p.amount, p.currency)}
+                  </span>
+                  <Link
+                    href={`/pagos/nuevo?repetir=${p.id}`}
+                    className="btn btn-primary"
+                    style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+                  >
+                    ↻ Repetir
+                  </Link>
+                </div>
+              </div>
+            ))}
           </div>
         </section>
       )}
-
-      {/* Débitos automáticos próximos (informativo) */}
-      <section className="card" style={{ padding: "1.75rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <h2 style={{ fontSize: "1.05rem", fontWeight: 600 }}>Próximos débitos automáticos</h2>
-          <Link href="/servicios" style={{ fontSize: "0.85rem", color: "var(--primary)" }}>Ver todos →</Link>
-        </div>
-        {autoDebit.length === 0 ? (
-          <Empty>No hay débitos automáticos en los próximos 30 días.</Empty>
-        ) : (
-          <div style={{ display: "grid", gap: "0.5rem" }}>
-            {autoDebit.map(({ s, date, d }) => {
-              const dd = d ?? 0;
-              return (
-                <div key={s.id} style={rowStyle}>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
-                    <span style={{ fontWeight: 500 }}>{s.name}</span>
-                    {s.category && <CategoryTag name={s.category.name} color={s.category.color} />}
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                    <span style={{ fontSize: "0.82rem", color: "var(--text-muted)" }}>
-                      {formatDate(date)} · {BILLING_CYCLE_LABELS[s.billing_cycle]}
-                    </span>
-                    <span className="badge" style={{ background: "rgba(148,163,184,.12)", color: "var(--text-muted)" }}>
-                      {dd === 0 ? "Hoy" : `En ${dd} días`}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </section>
 
       {/* Últimos pagos */}
       <section className="card" style={{ padding: "1.75rem" }}>
@@ -209,16 +162,19 @@ export default async function DashboardPage() {
           <h2 style={{ fontSize: "1.05rem", fontWeight: 600 }}>Últimos pagos</h2>
           <Link href="/pagos" style={{ fontSize: "0.85rem", color: "var(--primary)" }}>Ver todos →</Link>
         </div>
-        {recentPayments.length === 0 ? (
-          <Empty>Todavía no cargaste ningún pago. <Link href="/pagos/nuevo" style={{ color: "var(--primary)" }}>Registrá el primero.</Link></Empty>
+        {recientes.length === 0 ? (
+          <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", padding: "0.5rem 0" }}>
+            Todavía no cargaste ningún pago.{" "}
+            <Link href="/pagos/nuevo" style={{ color: "var(--primary)" }}>Registrá el primero.</Link>
+          </p>
         ) : (
           <div style={{ display: "grid", gap: "0.5rem" }}>
-            {recentPayments.map((p) => (
-              <Link key={p.id} href={`/pagos/${p.id}`} style={rowStyle}>
+            {recientes.map((p) => (
+              <div key={p.id} style={rowStyle}>
                 <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
-                  <span style={{ fontWeight: 500 }}>
+                  <Link href={`/pagos/${p.id}`} style={{ fontWeight: 500, color: "var(--text)" }}>
                     {p.description || p.service?.name || "Pago"}
-                  </span>
+                  </Link>
                   {p.category && <CategoryTag name={p.category.name} color={p.category.color} />}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
@@ -227,14 +183,36 @@ export default async function DashboardPage() {
                     {formatMoney(p.amount, p.currency)}
                   </span>
                   <PaymentStatusBadge status={p.status} />
+                  <Link
+                    href={`/pagos/nuevo?repetir=${p.id}`}
+                    className="btn btn-ghost"
+                    style={{ padding: "0.25rem 0.6rem", fontSize: "0.76rem" }}
+                    title="Cargar otro pago igual a este"
+                  >
+                    ↻
+                  </Link>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
         )}
       </section>
     </div>
   );
+}
+
+// Un mismo gasto puede tener varios pagos el mes pasado; para sugerir repetir
+// alcanza con uno por proveedor+descripción.
+function dedupe(pagos: Payment[]): Payment[] {
+  const vistos = new Set<string>();
+  const out: Payment[] = [];
+  for (const p of pagos) {
+    const k = claveDeGasto(p);
+    if (vistos.has(k)) continue;
+    vistos.add(k);
+    out.push(p);
+  }
+  return out;
 }
 
 const rowStyle: React.CSSProperties = {
@@ -248,7 +226,7 @@ const rowStyle: React.CSSProperties = {
   flexWrap: "wrap",
 };
 
-// Fila de detalle de un pago del mes: muestra la conversión a ARS usada en la suma
+// Fila de detalle de un pago: muestra la conversión a ARS usada en la suma
 function paymentRow(p: Payment) {
   const ars = toARS(Number(p.amount), p.currency, p.exchange_rate);
   return {
@@ -261,25 +239,4 @@ function paymentRow(p: Payment) {
     amount: ars == null ? "sin cotización" : formatMoney(ars, "ARS"),
     warn: ars == null,
   };
-}
-
-// Fila de detalle de un servicio con renovación próxima
-function serviceRow(s: Service) {
-  const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s));
-  const d = daysUntil(date);
-  return {
-    id: s.id,
-    href: `/servicios/${s.id}`,
-    title: s.name,
-    meta: `${formatDate(date)} · ${BILLING_CYCLE_LABELS[s.billing_cycle]}${
-      d == null ? "" : d < 0 ? ` · venció hace ${-d}d` : d === 0 ? " · vence hoy" : ` · en ${d}d`
-    }`,
-    amount: "",
-  };
-}
-
-function Empty({ children }: { children: React.ReactNode }) {
-  return (
-    <p style={{ color: "var(--text-muted)", fontSize: "0.9rem", padding: "0.5rem 0" }}>{children}</p>
-  );
 }
