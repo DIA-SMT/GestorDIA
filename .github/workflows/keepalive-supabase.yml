@@ -37,26 +37,78 @@ jobs:
     name: Consultar la base
     runs-on: ubuntu-latest
     timeout-minutes: 5
+
+    # Se aceptan los dos nombres posibles (el corto y el del .env.local) y tanto
+    # secrets como variables. No es paranoia: el modo de falla más común de esto
+    # es haber cargado el valor correcto en el casillero de al lado, y el error
+    # que sale es un "falta el secret" que parece mentira cuando lo cargaste.
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL || vars.SUPABASE_URL || vars.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || vars.SUPABASE_ANON_KEY || vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
     steps:
-      - name: Ping a la API REST
+      - name: Verificar credenciales
+        # Solo booleanos "está / no está": los valores nunca se imprimen.
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SEC_URL: ${{ secrets.SUPABASE_URL != '' }}
+          SEC_URL_NEXT: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL != '' }}
+          VAR_URL: ${{ vars.SUPABASE_URL != '' }}
+          VAR_URL_NEXT: ${{ vars.NEXT_PUBLIC_SUPABASE_URL != '' }}
+          SEC_KEY: ${{ secrets.SUPABASE_ANON_KEY != '' }}
+          SEC_KEY_NEXT: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY != '' }}
+          VAR_KEY: ${{ vars.SUPABASE_ANON_KEY != '' }}
+          VAR_KEY_NEXT: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY != '' }}
         run: |
           set -euo pipefail
 
-          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
-            echo "::error::Faltan los secrets SUPABASE_URL y/o SUPABASE_ANON_KEY. Cargalos en Settings → Secrets and variables → Actions."
+          marca() { [ "$1" = "true" ] && echo "sí" || echo "—"; }
+
+          echo "Dónde busqué cada credencial:"
+          echo ""
+          printf '  %-38s %s\n' "secrets.SUPABASE_URL"                 "$(marca "$SEC_URL")"
+          printf '  %-38s %s\n' "secrets.NEXT_PUBLIC_SUPABASE_URL"     "$(marca "$SEC_URL_NEXT")"
+          printf '  %-38s %s\n' "vars.SUPABASE_URL"                    "$(marca "$VAR_URL")"
+          printf '  %-38s %s\n' "vars.NEXT_PUBLIC_SUPABASE_URL"        "$(marca "$VAR_URL_NEXT")"
+          echo ""
+          printf '  %-38s %s\n' "secrets.SUPABASE_ANON_KEY"            "$(marca "$SEC_KEY")"
+          printf '  %-38s %s\n' "secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY" "$(marca "$SEC_KEY_NEXT")"
+          printf '  %-38s %s\n' "vars.SUPABASE_ANON_KEY"               "$(marca "$VAR_KEY")"
+          printf '  %-38s %s\n' "vars.NEXT_PUBLIC_SUPABASE_ANON_KEY"   "$(marca "$VAR_KEY_NEXT")"
+          echo ""
+
+          faltan=""
+          [ -z "${SUPABASE_URL:-}" ] && faltan="la URL"
+          [ -z "${SUPABASE_ANON_KEY:-}" ] && faltan="${faltan:+$faltan y }el anon key"
+
+          if [ -n "$faltan" ]; then
+            echo "::error::No encontré $faltan en NINGUNO de los lugares de arriba. Si estás seguro de haberla cargado, casi siempre es una de estas cuatro: (1) quedó en la pestaña Variables en vez de Secrets — igual la tomo, así que revisá el nombre; (2) el nombre tiene un typo o un espacio; (3) la cargaste como Environment secret (Settings → Environments) en vez de repository secret, y ahí el job no la ve salvo que declare 'environment:'; (4) es un secret de la organización DIA-SMT sin este repo habilitado en su política de acceso."
             exit 1
           fi
+
+          echo "✔ Credenciales encontradas."
+
+      - name: Ping a la API REST
+        run: |
+          set -euo pipefail
+
+          # Pegar un valor en el casillero de GitHub arrastra saltos de línea o
+          # espacios con facilidad, y eso rompe tanto la URL como el header.
+          url="$(printf '%s' "$SUPABASE_URL" | tr -d '[:space:]')"
+          key="$(printf '%s' "$SUPABASE_ANON_KEY" | tr -d '[:space:]')"
+          url="${url%/}"
+
+          case "$url" in
+            https://*) ;;
+            *) echo "::error::La URL no arranca con https://. Tiene que ser la Project URL de Supabase, algo como https://xxxxxxxx.supabase.co"; exit 1 ;;
+          esac
 
           # Consulta mínima real contra Postgres: una columna, una fila.
           # Con RLS el rol anónimo no ve nada y devuelve [] (2 bytes), pero la
           # query igual se ejecuta, que es lo que cuenta como actividad.
           codigo=$(curl -sS -o respuesta.txt -w '%{http_code}' \
             --max-time 30 --retry 3 --retry-delay 15 --retry-all-errors \
-            "${SUPABASE_URL%/}/rest/v1/categories?select=id&limit=1" \
-            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            "$url/rest/v1/categories?select=id&limit=1" \
+            -H "apikey: $key" \
             -H "Accept: application/json")
 
           if [ "$codigo" -ge 200 ] && [ "$codigo" -lt 300 ]; then
@@ -65,7 +117,7 @@ jobs:
           else
             # Se falla a propósito: un keepalive que dejó de funcionar en
             # silencio es peor que no tenerlo. Así GitHub manda el mail.
-            echo "::error::Supabase respondió $codigo. Si es 401/403 el anon key está vencido o rotado; si es 5xx o timeout, puede que el proyecto YA esté pausado."
+            echo "::error::Supabase respondió $codigo. Si es 401/403 el anon key está mal o fue rotado; si es 404 revisá la URL; si es 5xx o timeout, puede que el proyecto YA esté pausado."
             echo "Respuesta:"
             cat respuesta.txt
             echo
