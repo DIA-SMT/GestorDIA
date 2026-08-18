@@ -154,13 +154,20 @@ lo evita: cada dos días hace una consulta mínima a la API REST (una columna, u
 fila; con RLS el rol anónimo no ve nada y devuelve `[]`, pero la query igual se
 ejecuta, que es lo que cuenta).
 
-Para que funcione hay que cargar dos **secrets** en GitHub
+Para que funcione hay que cargar las credenciales en GitHub
 (*Settings → Secrets and variables → Actions → New repository secret*):
 
-| Secret | Valor |
+| Nombre | Valor |
 |--------|-------|
 | `SUPABASE_URL` | el mismo de `NEXT_PUBLIC_SUPABASE_URL` |
 | `SUPABASE_ANON_KEY` | el mismo de `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+
+El workflow también acepta los nombres largos (`NEXT_PUBLIC_SUPABASE_URL` y
+`NEXT_PUBLIC_SUPABASE_ANON_KEY`, tal cual el `.env.local`) y los busca tanto en
+*Secrets* como en *Variables*. No es capricho: el error más común es cargar el
+valor correcto en el casillero de al lado, y el síntoma es un "falta el secret"
+que parece mentira. Si igual no las encuentra, el primer paso del job imprime en
+qué lugares buscó y cuáles estaban.
 
 > **Tres cosas para tener en cuenta:**
 > 1. Los workflows programados **solo corren desde la rama default** (`main`).
@@ -169,6 +176,11 @@ Para que funcione hay que cargar dos **secrets** en GitHub
 >    durante 60 días. Avisa por mail; se rehabilitan desde la pestaña Actions.
 > 3. El job **falla a propósito** si la respuesta no es 2xx, así GitHub manda el
 >    mail. Un keepalive que dejó de andar en silencio es peor que no tenerlo.
+
+Un caso que no se arregla solo: si las cargaste como **Environment secret**
+(*Settings → Environments*) en vez de repository secret, el job no las ve a
+menos que declare `environment:`. Lo mismo si son secrets de la organización sin
+este repo habilitado en su política de acceso.
 
 Se puede correr a mano desde **Actions → Keepalive Supabase → Run workflow**.
 
