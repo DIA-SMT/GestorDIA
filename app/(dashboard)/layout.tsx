@@ -1,8 +1,6 @@
 import { redirect } from "next/navigation";
 import Image from "next/image";
-import { getCurrentUser, listServices, IS_DEMO } from "@/lib/data";
-import { loadPendingCharges } from "@/lib/pending";
-import { daysUntil, effectiveRenewal, anchorDayOf } from "@/lib/utils";
+import { getCurrentUser, IS_DEMO } from "@/lib/data";
 import Sidebar from "@/components/sidebar";
 import Assistant from "@/components/assistant";
 
@@ -14,31 +12,9 @@ export default async function DashboardLayout({
   const user = await getCurrentUser();
   if (!user) redirect("/login");
 
-  const [services, pending] = await Promise.all([listServices(), loadPendingCharges()]);
-
-  // Alertas para el asistente: próximos cobros (≤30 días). Los ya vencidos no
-  // van acá: aparecen como cargos por confirmar, que es donde se resuelven.
-  const alerts = services
-    .filter((s) => s.status === "active" && s.next_renewal_date)
-    .map((s) => {
-      const date = effectiveRenewal(s.next_renewal_date, s.billing_cycle, s.payment_mode, anchorDayOf(s))!;
-      return { s, date, d: daysUntil(date)!, auto: s.payment_mode !== "manual" };
-    })
-    .filter(({ d, auto }) => (auto ? d >= 0 && d <= 30 : d > 0 && d <= 30))
-    .sort((a, b) => a.d - b.d)
-    .map(({ s, date, d, auto }) => ({
-      id: s.id,
-      name: s.name,
-      date,
-      days: d,
-      amount: s.expected_amount,
-      currency: s.currency,
-      auto,
-    }));
-
   return (
     <div className="app-shell">
-      <Sidebar email={user.email} porConfirmar={pending.total} />
+      <Sidebar email={user.email} />
 
       {/* minWidth 0 para que las tablas anchas scrolleen adentro y no estiren el grid */}
       <div style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -82,7 +58,7 @@ export default async function DashboardLayout({
       </div>
 
       {/* Fuera del grid y sin ancestros con transform: el FAB es position:fixed */}
-      <Assistant alerts={alerts} />
+      <Assistant />
     </div>
   );
 }

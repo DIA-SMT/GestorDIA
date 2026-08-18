@@ -1,19 +1,7 @@
 // Tipos que reflejan el esquema de la base de datos
 
-export type BillingCycle =
-  | "monthly"
-  | "yearly"
-  | "quarterly"
-  | "weekly"
-  | "one_time"
-  | "on_demand"
-  | "custom";
-
 export type ServiceStatus = "active" | "paused" | "cancelled";
 
-// Cómo se cobra: automático (débito en la tarjeta, se cobra solo)
-// o manual (hay que acordarse de pagarlo → genera alerta)
-export type PaymentMode = "automatic" | "manual";
 export type PaymentStatus = "paid" | "pending" | "failed" | "refunded";
 export type CurrencyCode = "USD" | "ARS" | "EUR";
 
@@ -43,25 +31,27 @@ export interface Category {
   created_at: string;
 }
 
+/**
+ * Un servicio AGRUPA pagos: entrás a "Cursor Pro" y ves todo lo que se le pagó.
+ *
+ * No modela una suscripción con ciclo ni propone cargos. Se probó ese camino y
+ * no servía para este caso: el monto real cambia todos los meses (se suman o
+ * se sacan asientos, cambia el consumo), así que un "monto esperado" fijo
+ * proponía siempre el número equivocado y corregirlo costaba más que cargar el
+ * pago a mano. Los gastos se cargan cuando se pagan, y para los que se repiten
+ * está el botón "Repetir" de cada pago.
+ *
+ * Las columnas del esquema viejo (billing_cycle, next_renewal_date,
+ * expected_amount, payment_mode, billing_anchor_day) siguen en la base con sus
+ * valores por defecto: no se borró nada, simplemente no se usan.
+ */
 export interface Service {
   id: string;
   name: string;
   description: string | null;
   url: string | null;
   category_id: string | null;
-  billing_cycle: BillingCycle;
-  expected_amount: number | null;
-  currency: CurrencyCode;
   status: ServiceStatus;
-  payment_mode: PaymentMode;
-  // Ancla de facturación: el primer ciclo que TODAVÍA NADIE confirmó.
-  // Solo la mueven acciones explícitas (confirmar, omitir, poner al día,
-  // editar el servicio). Nunca se adelanta sola por mostrarla en pantalla.
-  next_renewal_date: string | null;
-  // Día real de cobro (1-31). Existe aparte porque next_renewal_date se recorta
-  // en los meses cortos (el 31 pasa a 28 en febrero) y sin esto el servicio
-  // perdería su día para siempre. Opcional: null si no corrieron la migración 0004.
-  billing_anchor_day?: number | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -89,9 +79,10 @@ export interface Payment {
   paid_by: string | null;
   notes: string | null;
   rendido_at?: string | null; // cuándo se rindió al contador (null = pendiente)
-  // Ciclo que cubre este pago (solo si nació de un cargo recurrente confirmado).
-  // Un índice único (service_id, cycle_date) impide confirmar dos veces el mismo mes.
-  cycle_date?: string | null;
+  // Lote de rendición al que pertenece (migración 0005). `rendido_at` dice
+  // "ya se presentó"; esto dice "en qué entrega". Puede ser null en pagos
+  // marcados antes de la 0005 en una base sin migrar.
+  rendicion_id?: string | null;
   created_at: string;
   updated_at: string;
   service?: Service | null;
@@ -110,26 +101,38 @@ export interface Receipt {
   created_at: string;
 }
 
-// Etiquetas legibles para los enums
-export const BILLING_CYCLE_LABELS: Record<BillingCycle, string> = {
-  monthly: "Mensual",
-  yearly: "Anual",
-  quarterly: "Trimestral",
-  weekly: "Semanal",
-  one_time: "Único",
-  on_demand: "Recarga a demanda",
-  custom: "Personalizado",
-};
+/**
+ * Una entrega al contador. Es un LOTE cerrado: los pagos que incluye, el
+ * período que realmente cubre (no un mes calendario), los totales congelados
+ * al momento de entregarla y el PDF exacto que se imprimió.
+ *
+ * Congelar los totales es a propósito: si mañana se corrige la cotización de un
+ * pago, la rendición Nº 7 tiene que seguir diciendo lo que decía el papel.
+ */
+export interface Rendicion {
+  id: string;
+  numero: number;
+  titulo: string | null;
+  notas: string | null;
+  periodo_desde: string;
+  periodo_hasta: string;
+  cantidad: number;
+  total_ars: number;
+  total_usd: number;
+  /** Ruta del PDF en el bucket 'rendiciones'. null = no se llegó a archivar. */
+  pdf_path: string | null;
+  presentada_at: string;
+  created_by: string | null;
+  created_at: string;
+  /** Solo en el detalle */
+  payments?: Payment[];
+}
 
+// Etiquetas legibles para los enums
 export const SERVICE_STATUS_LABELS: Record<ServiceStatus, string> = {
   active: "Activa",
   paused: "En pausa",
   cancelled: "Cancelada",
-};
-
-export const PAYMENT_MODE_LABELS: Record<PaymentMode, string> = {
-  automatic: "Débito automático",
-  manual: "Pago manual",
 };
 
 export const PAYMENT_STATUS_LABELS: Record<PaymentStatus, string> = {

@@ -112,7 +112,17 @@ export default async function PagosPage({
                       <Td style={{ textAlign: "right", fontWeight: 600 }}>{formatMoney(p.amount, p.currency)}</Td>
                       <Td muted style={{ textAlign: "right" }}>{formatMoney(ars, "ARS")}</Td>
                       <Td><PaymentStatusBadge status={p.status} /></Td>
-                      <Td><Link href={`/pagos/${p.id}`} style={{ color: "var(--primary)", fontSize: "0.85rem" }}>Ver →</Link></Td>
+                      <Td style={{ whiteSpace: "nowrap" }}>
+                        <Link
+                          href={`/pagos/nuevo?repetir=${p.id}`}
+                          className="btn btn-ghost"
+                          style={{ padding: "0.2rem 0.5rem", fontSize: "0.76rem", marginRight: "0.4rem" }}
+                          title="Cargar otro pago igual a este"
+                        >
+                          ↻
+                        </Link>
+                        <Link href={`/pagos/${p.id}`} style={{ color: "var(--primary)", fontSize: "0.85rem" }}>Ver →</Link>
+                      </Td>
                     </tr>
                   );
                 })}

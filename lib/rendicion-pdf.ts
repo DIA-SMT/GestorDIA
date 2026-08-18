@@ -32,6 +32,12 @@ export interface RendicionPdfRow {
 export interface RendicionPdfResult {
   ok: boolean;
   filas: number;
+  /**
+   * El archivo generado. Se devuelve además de descargarlo porque la rendición
+   * lo archiva en Storage: el comprobante que se guarda tiene que ser el MISMO
+   * byte por byte que el que se imprimió, no uno regenerado después.
+   */
+  blob?: Blob;
   /** Archivos efectivamente incrustados en el PDF */
   incrustados: number;
   /** Archivos que estaban adjuntos pero no se pudieron traer/incrustar */
@@ -49,10 +55,14 @@ interface FetchedFile {
 
 export async function downloadRendicionPdf(opts: {
   title: string;
+  /** Línea al pie del título: N° de rendición, fecha de entrega, período */
+  subtitulo?: string;
   rows: RendicionPdfRow[];
   totalARS: number;
   totalUSD: number;
   filename: string;
+  /** false = solo devolver el blob, sin disparar la descarga */
+  descargar?: boolean;
 }): Promise<RendicionPdfResult> {
   try {
     // 1) Primero se traen TODOS los adjuntos, antes de dibujar nada. Así la
@@ -97,9 +107,13 @@ export async function downloadRendicionPdf(opts: {
       40,
       58
     );
+    if (opts.subtitulo) {
+      doc.setTextColor(70);
+      doc.text(opts.subtitulo, 40, 72);
+    }
 
     autoTable(doc, {
-      startY: 74,
+      startY: opts.subtitulo ? 88 : 74,
       head: [["Fecha", "Proveedor", "CUIT", "Descripción", "Comprobante", "N°", "Moneda", "Monto", "En ARS", "Recibo"]],
       body: opts.rows.map((r, i) => [
         r.fecha,
@@ -147,14 +161,17 @@ export async function downloadRendicionPdf(opts: {
 
     // 3) Adjuntos
     const hayAdjuntos = traidos.some((fs) => fs.some((f) => f.bytes !== null));
+    const entregar = (blob: Blob): RendicionPdfResult => {
+      if (opts.descargar !== false) triggerDownload(blob, opts.filename);
+      return { ok: true, filas: opts.rows.length, incrustados, fallidos, blob };
+    };
+
     if (!hayAdjuntos) {
-      triggerDownload(new Blob([doc.output("arraybuffer")], { type: "application/pdf" }), opts.filename);
-      return { ok: true, filas: opts.rows.length, incrustados, fallidos };
+      return entregar(new Blob([doc.output("arraybuffer")], { type: "application/pdf" }));
     }
 
     const merged = await appendReceipts(doc.output("arraybuffer"), opts.rows, traidos, finalY + (sinCotiz > 0 ? 44 : 30));
-    triggerDownload(new Blob([merged as unknown as BlobPart], { type: "application/pdf" }), opts.filename);
-    return { ok: true, filas: opts.rows.length, incrustados, fallidos };
+    return entregar(new Blob([merged as unknown as BlobPart], { type: "application/pdf" }));
   } catch (e) {
     return {
       ok: false,

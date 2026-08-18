@@ -2,22 +2,14 @@
 // Los datos viven mientras el server esté corriendo. Se guardan en globalThis
 // para sobrevivir al hot-reload del dev server.
 
-import type { Category, Payment, Receipt, Service } from "./types";
-
-export interface CycleSkip {
-  id: string;
-  service_id: string;
-  cycle_date: string;
-  reason: string | null;
-  created_at: string;
-}
+import type { Category, Payment, Receipt, Rendicion, Service } from "./types";
 
 export interface DemoDB {
   categories: Category[];
   services: Service[];
   payments: Payment[];
   receipts: Receipt[];
-  skips: CycleSkip[];
+  rendiciones: Rendicion[];
 }
 
 function seed(): DemoDB {
@@ -36,46 +28,37 @@ function seed(): DemoDB {
     {
       id: "srv-cursor", name: "Cursor Pro", description: "IDE con IA",
       url: "https://cursor.com/settings", category_id: "cat-ia",
-      billing_cycle: "monthly", expected_amount: 20, currency: "USD",
-      status: "active", payment_mode: "automatic", next_renewal_date: "2026-07-18",
+      status: "active",
       created_by: null, created_at: t, updated_at: t,
     },
     {
       id: "srv-openai", name: "OpenAI API", description: "Créditos de API",
       url: "https://platform.openai.com/account/billing", category_id: "cat-ia",
-      billing_cycle: "monthly", expected_amount: 30, currency: "USD",
-      status: "active", payment_mode: "manual", next_renewal_date: "2026-07-14",
+      status: "active",
       created_by: null, created_at: t, updated_at: t,
     },
     {
       id: "srv-vercel", name: "Vercel Pro", description: "Hosting / deploy",
       url: "https://vercel.com/dashboard", category_id: "cat-host",
-      billing_cycle: "monthly", expected_amount: 20, currency: "USD",
-      status: "active", payment_mode: "automatic", next_renewal_date: "2026-07-25",
+      status: "active",
       created_by: null, created_at: t, updated_at: t,
     },
     {
       id: "srv-dominio", name: "Dominio gestordia.com", description: "Renovación anual",
       url: null, category_id: "cat-dom",
-      billing_cycle: "yearly", expected_amount: 15, currency: "USD",
-      status: "active", payment_mode: "manual", next_renewal_date: "2027-01-10",
+      status: "active",
       created_by: null, created_at: t, updated_at: t,
     },
     {
       id: "srv-figma", name: "Figma", description: "Diseño (dado de baja)",
       url: "https://figma.com", category_id: "cat-design",
-      billing_cycle: "monthly", expected_amount: 12, currency: "USD",
-      status: "cancelled", payment_mode: "automatic", next_renewal_date: null,
+      status: "cancelled",
       created_by: null, created_at: t, updated_at: t,
     },
     {
-      // Cobra el 31: sirve para ver que el ciclo NO se corre de día al pasar
-      // por un mes corto (31/05 -> 30/06 -> 31/07, no 01/07 -> 01/08).
       id: "srv-claude", name: "Claude Pro", description: "Suscripción del equipo",
       url: "https://claude.ai", category_id: "cat-ia",
-      billing_cycle: "monthly", expected_amount: 25, currency: "USD",
-      status: "active", payment_mode: "automatic", next_renewal_date: "2026-05-31",
-      billing_anchor_day: 31,
+      status: "active",
       created_by: null, created_at: t, updated_at: t,
     },
   ];
@@ -144,7 +127,7 @@ function seed(): DemoDB {
     },
   ];
 
-  return { categories, services, payments, receipts: [], skips: [] };
+  return { categories, services, payments, receipts: [], rendiciones: [] };
 }
 
 export function demoDb(): DemoDB {
@@ -158,7 +141,7 @@ export function demoDb(): DemoDB {
   db.services ??= [];
   db.payments ??= [];
   db.receipts ??= [];
-  db.skips ??= [];
+  db.rendiciones ??= [];
   return db;
 }
 
