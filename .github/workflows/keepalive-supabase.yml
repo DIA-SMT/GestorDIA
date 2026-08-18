@@ -1,0 +1,73 @@
+name: Keepalive Supabase
+
+# Supabase pausa los proyectos del plan free después de ~7 días sin actividad.
+# Reactivarlo es manual y mientras tanto la app queda caída, así que este
+# workflow hace una consulta mínima cada dos días para que eso no pase.
+#
+# DOS COSAS QUE HAY QUE SABER:
+#
+# 1. Los workflows programados SOLO se disparan desde la rama default (main).
+#    Mientras este archivo viva únicamente en otra rama, el cron no corre.
+#
+# 2. GitHub deshabilita los workflows programados en repos sin actividad
+#    durante 60 días (avisa por mail antes). Si el proyecto queda quieto un
+#    par de meses, hay que volver a habilitarlo desde la pestaña Actions.
+
+on:
+  schedule:
+    # Cada 2 días a las 13:23 UTC (10:23 en Argentina). El minuto es
+    # intencionalmente "raro": las corridas en punto son las más congestionadas
+    # y las que GitHub más atrasa.
+    #
+    # Dos días da margen de sobra: GitHub puede atrasar o directamente saltear
+    # corridas cuando está cargado, y aun perdiendo dos seguidas quedan 6 días,
+    # por debajo del umbral de 7.
+    - cron: "23 13 */2 * *"
+  workflow_dispatch: # para poder probarlo a mano desde la pestaña Actions
+
+# No necesita leer ni escribir nada del repo.
+permissions: {}
+
+concurrency:
+  group: keepalive-supabase
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Consultar la base
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping a la API REST
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_ANON_KEY:-}" ]; then
+            echo "::error::Faltan los secrets SUPABASE_URL y/o SUPABASE_ANON_KEY. Cargalos en Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
+          # Consulta mínima real contra Postgres: una columna, una fila.
+          # Con RLS el rol anónimo no ve nada y devuelve [] (2 bytes), pero la
+          # query igual se ejecuta, que es lo que cuenta como actividad.
+          codigo=$(curl -sS -o respuesta.txt -w '%{http_code}' \
+            --max-time 30 --retry 3 --retry-delay 15 --retry-all-errors \
+            "${SUPABASE_URL%/}/rest/v1/categories?select=id&limit=1" \
+            -H "apikey: ${SUPABASE_ANON_KEY}" \
+            -H "Accept: application/json")
+
+          if [ "$codigo" -ge 200 ] && [ "$codigo" -lt 300 ]; then
+            echo "✔ Supabase respondió $codigo — la base sigue despierta."
+            echo "✔ Ping OK ($codigo) — $(date -u '+%Y-%m-%d %H:%M UTC')" >> "$GITHUB_STEP_SUMMARY"
+          else
+            # Se falla a propósito: un keepalive que dejó de funcionar en
+            # silencio es peor que no tenerlo. Así GitHub manda el mail.
+            echo "::error::Supabase respondió $codigo. Si es 401/403 el anon key está vencido o rotado; si es 5xx o timeout, puede que el proyecto YA esté pausado."
+            echo "Respuesta:"
+            cat respuesta.txt
+            echo
+            exit 1
+          fi

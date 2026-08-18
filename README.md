@@ -144,6 +144,34 @@ y contraseña (Supabase Auth). Cada persona del equipo se crea su cuenta.
    `NEXT_PUBLIC_SUPABASE_ANON_KEY`) en **Settings → Environment Variables**.
 3. Deploy. Listo.
 
+### 6. Evitar que Supabase pause el proyecto
+
+En el plan free, Supabase **pausa el proyecto después de ~7 días sin actividad**.
+Reactivarlo es manual y mientras tanto la app queda caída.
+
+[`.github/workflows/keepalive-supabase.yml`](.github/workflows/keepalive-supabase.yml)
+lo evita: cada dos días hace una consulta mínima a la API REST (una columna, una
+fila; con RLS el rol anónimo no ve nada y devuelve `[]`, pero la query igual se
+ejecuta, que es lo que cuenta).
+
+Para que funcione hay que cargar dos **secrets** en GitHub
+(*Settings → Secrets and variables → Actions → New repository secret*):
+
+| Secret | Valor |
+|--------|-------|
+| `SUPABASE_URL` | el mismo de `NEXT_PUBLIC_SUPABASE_URL` |
+| `SUPABASE_ANON_KEY` | el mismo de `NEXT_PUBLIC_SUPABASE_ANON_KEY` |
+
+> **Tres cosas para tener en cuenta:**
+> 1. Los workflows programados **solo corren desde la rama default** (`main`).
+>    En una rama de trabajo el cron no se dispara nunca.
+> 2. GitHub **deshabilita los workflows programados** en repos sin actividad
+>    durante 60 días. Avisa por mail; se rehabilitan desde la pestaña Actions.
+> 3. El job **falla a propósito** si la respuesta no es 2xx, así GitHub manda el
+>    mail. Un keepalive que dejó de andar en silencio es peor que no tenerlo.
+
+Se puede correr a mano desde **Actions → Keepalive Supabase → Run workflow**.
+
 ---
 
 ## Funcionalidades
