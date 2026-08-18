@@ -66,10 +66,22 @@ export function monthLabel(mes: string): string {
   );
 }
 
-// Mes anterior a uno dado (YYYY-MM)
-export function prevMonth(mes: string): string {
+// Corre un mes (YYYY-MM) n posiciones. Se hace con aritmética entera y no con
+// Date.setMonth(), que desborda: sobre un 31 devuelve el mes siguiente.
+export function shiftMonth(mes: string, delta: number): string {
   const [y, m] = mes.split("-").map(Number);
-  return m === 1 ? `${y - 1}-12` : `${y}-${String(m - 1).padStart(2, "0")}`;
+  const total = y * 12 + (m - 1) + delta;
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
+}
+
+// Mes anterior a uno dado (YYYY-MM)
+export const prevMonth = (mes: string): string => shiftMonth(mes, -1);
+
+// Cuántos meses hay entre dos meses (YYYY-MM)
+export function monthsBetween(desde: string, hasta: string): number {
+  const [yd, md] = desde.split("-").map(Number);
+  const [yh, mh] = hasta.split("-").map(Number);
+  return (yh * 12 + mh) - (yd * 12 + md);
 }
 
 // Equivalente en ARS de un pago

@@ -4,7 +4,8 @@
 // muestra como tarjeta de confirmación; /api/chat/execute las ejecuta.
 
 import { getCurrentUser, listPayments, listServices, listCategories, listPendientesDeRendir } from "@/lib/data";
-import { toARS, todayISO, monthOf, prevMonth, claveDeGasto } from "@/lib/utils";
+import { toARS, todayISO, monthOf, shiftMonth } from "@/lib/utils";
+import { gastosSinCargarEsteMes, desdeCuando, VENTANA_MESES } from "@/lib/gastos-habituales";
 import { RECEIPT_TYPE_LABELS, PAYMENT_STATUS_LABELS, SERVICE_STATUS_LABELS } from "@/lib/types";
 import { TOOL_DEFS, buildProposal } from "@/lib/assistant-tools";
 import { faltantesDe } from "@/lib/rendicion-status";
@@ -20,7 +21,7 @@ const MAX_MESSAGES = 20; // tope de historial de conversación
 // y con problemas comunes, además de responder sobre los datos.
 const APP_GUIDE = `
 GUÍA DE LA APP (usala para ayudar al usuario a usar gestorDIA):
-- Dashboard (/): KPIs del mes (gasto en ARS y USD, pendiente de rendir, sin factura cargada, servicios activos). Cada tarjeta se clickea y abre el detalle de qué compone el número. Abajo: "Pagaste esto el mes pasado y todavía no este mes" (lista con botón "↻ Repetir" por gasto) y los últimos pagos.
+- Dashboard (/): KPIs del mes (gasto en ARS y USD, pendiente de rendir, sin factura cargada, servicios activos). Cada tarjeta se clickea y abre el detalle de qué compone el número. Abajo: "Venís pagando esto y este mes todavía no lo cargaste" —mira los últimos 4 meses, no solo el anterior, así un mes salteado o un gasto bimestral no desaparece— con el monto de la última vez, un badge "N de los últimos 4 meses" en los habituales, un aviso ámbar en los que hace 2+ meses que no se cargan, y un botón "↻ Repetir" por gasto. Después, los últimos pagos.
 - Pagos (/pagos): lista de todos los pagos con filtros. Botón "+ Registrar pago" (/pagos/nuevo): formulario con servicio (opcional), categoría, descripción, monto y moneda, cotización (si es USD: cargarla hace que el pago sume en los totales en ARS), fecha, estado, medio de pago, y datos para rendición: proveedor, CUIT, tipo de comprobante, número. Se pueden adjuntar comprobantes (imagen o PDF). Cada fila tiene un "↻" que repite ese gasto.
 - Detalle de pago (/pagos/[id]): vista tipo ticket. Botón "Editar" para modificar cualquier campo (ahí se corrige una cotización faltante), adjuntar o borrar recibos, eliminar el pago, y "↻ Repetir este gasto".
 - Repetir un gasto (/pagos/nuevo?repetir=[id]): abre el formulario de pago nuevo precargado con los datos del pago original (servicio, categoría, descripción, monto, moneda, cotización, proveedor, CUIT, tipo de comprobante, medio de pago), con la fecha en HOY y el N° de comprobante vacío, porque cambia en cada factura. Es la forma de cargar un gasto que se repite todos los meses: se ajusta el monto y se guarda.
@@ -38,8 +39,9 @@ PROBLEMAS COMUNES:
 - "Cerré una rendición sin querer": misma vía, "↩ Reabrir" en la ficha de esa rendición. Para mirar el PDF sin cerrar nada, la próxima vez usá "👁 Vista previa".
 - "El contador me pidió las facturas": entrá a /rendicion y cargá los datos con el lápiz ✎ de cada fila (proveedor, CUIT, tipo y N° de comprobante). Para adjuntar el archivo de la factura hay que abrir el pago. Filtrá por "Solo los que falta completar" para verlos juntos.
 - "Me llegó la factura de un gasto viejo": no hace falta buscar el mes, sigue apareciendo en /rendicion mientras no se haya rendido — el KPI "Arrastres" cuenta esos casos.
-- "Falta un gasto mensual": los gastos no se generan solos, se cargan cuando se pagan. El dashboard lista lo que se pagó el mes pasado y todavía no este mes, con un botón "↻ Repetir" para cargarlo en dos clics.
-- "Se cobró distinto al mes pasado": es lo normal y por eso se carga a mano. "↻ Repetir" trae todos los datos y solo hay que corregir el monto.
+- "Falta un gasto mensual": los gastos no se generan solos, se cargan cuando se pagan. El dashboard lista lo que se viene pagando y este mes todavía no se cargó, con un botón "↻ Repetir" para cargarlo en dos clics.
+- "Se me pasó cargar un mes": no se pierde. La lista del dashboard mira los últimos 4 meses, así que el gasto sigue apareciendo con un aviso de hace cuánto que no se carga. Al repetirlo, corregí la fecha si el pago fue de un mes anterior, para que caiga en la rendición del período que corresponde.
+- "Se cobró distinto a la vez anterior": es lo normal y por eso se carga a mano. "↻ Repetir" trae todos los datos y solo hay que corregir el monto.
 - "¿Y las suscripciones automáticas?": se registran igual que cualquier otro pago, cuando aparecen en el resumen de la tarjeta. El servicio solo agrupa el historial.
 `;
 
@@ -47,7 +49,7 @@ const TOOLS_GUIDE = `
 ACCIONES QUE PODÉS EJECUTAR (herramientas):
 - crear_pago: registrar un gasto/pago suelto nuevo.
 - crear_servicio: dar de alta un servicio (solo agrupa pagos: nombre, categoría, URL y notas).
-- Para "ya pagué X" o "repetí el gasto de X" usá crear_pago. Si X aparece en SE PAGÓ EL MES PASADO Y ESTE MES TODAVÍA NO, tomá de ahí la descripción, el proveedor y la moneda, pero PREGUNTÁ EL MONTO en vez de reusar el del mes pasado: cambia casi siempre y por eso se carga a mano. Si el usuario ya dijo el monto, usá ese y no preguntes nada.
+- Para "ya pagué X" o "repetí el gasto de X" usá crear_pago. Si X aparece en SE VIENE PAGANDO Y ESTE MES TODAVÍA NO SE CARGÓ, tomá de ahí la descripción, el proveedor y la moneda, pero PREGUNTÁ EL MONTO en vez de reusar el de la última vez: cambia casi siempre y por eso se carga a mano. Si el usuario ya dijo el monto, usá ese y no preguntes nada.
 - generar_rendicion: cuando el usuario pida "hacé/generá/dame la rendición" o "el PDF de la rendición" de un mes o de un proveedor/nombre, SIN hablar de marcar. Pasá "mes" (formato YYYY-MM; convertí "julio 2026" a "2026-07") y/o "texto" (nombre o proveedor). Genera el PDF (con los recibos adjuntos incrustados) para descargar; NO marca nada como rendido.
 - marcar_rendido: cuando el usuario diga "marcá como rendidos", "dá por rendidos" o "rendí" (confirmar la presentación al contador). Podés indicar los pagos por sus "id" (de los DATOS) o por "mes"/"texto" igual que generar_rendicion. CIERRA UNA RENDICIÓN: crea un lote numerado con esos pagos, igual que el botón de la pantalla, y devuelve su comprobante en PDF para descargar. Queda en /rendicion/historial y se puede reabrir desde ahí.
 Distinguí bien: pedir/descargar el PDF => generar_rendicion; confirmar que se presentaron (marcarlos) => marcar_rendido. Si el usuario primero pide el PDF y después dice "ahora marcalos"/"dalos por rendidos", usá el mismo mes/texto.
@@ -122,29 +124,26 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
       le_falta: faltantesDe(p).map((f) => f.label),
     }));
 
-  // Gastos del mes pasado que este mes todavía no se cargaron. Como los gastos
-  // ya no se generan solos, esto es lo que reemplaza a los cargos por confirmar.
+  // Lo que se viene pagando y este mes todavía no se cargó. Reemplaza a los
+  // cargos por confirmar, y usa el MISMO módulo que el dashboard para que el
+  // chat no diga una cosa y la pantalla otra.
   const mesActual = monthOf(hoy);
-  const mesAnterior = prevMonth(mesActual);
-  const yaEsteMes = new Set(
-    payments.filter((p) => monthOf(p.payment_date) === mesActual).map(claveDeGasto)
-  );
-  const vistos = new Set<string>();
-  const sinRepetir = payments
-    .filter((p) => monthOf(p.payment_date) === mesAnterior && p.status === "paid")
-    .filter((p) => {
-      const k = claveDeGasto(p);
-      if (yaEsteMes.has(k) || vistos.has(k)) return false;
-      vistos.add(k);
-      return true;
-    })
-    .map((p) => ({
-      id: p.id,
-      descripcion: p.description ?? p.service?.name ?? null,
-      proveedor: p.provider ?? null,
-      monto_del_mes_pasado: Number(p.amount),
-      moneda: p.currency,
-    }));
+  const desdeVentana = `${shiftMonth(mesActual, -VENTANA_MESES)}-01`;
+  const sinRepetir = gastosSinCargarEsteMes({
+    historial: payments.filter((p) => p.payment_date >= desdeVentana && monthOf(p.payment_date) < mesActual),
+    delMesActual: payments.filter((p) => monthOf(p.payment_date) === mesActual),
+    mesActual,
+    serviciosCancelados: new Set(services.filter((s) => s.status === "cancelled").map((s) => s.id)),
+  }).map((g) => ({
+    id: g.pago.id,
+    descripcion: g.pago.description ?? g.pago.service?.name ?? null,
+    proveedor: g.pago.provider ?? null,
+    ultima_vez: g.ultimaFecha,
+    monto_de_esa_vez: g.ultimoMonto,
+    moneda: g.pago.currency,
+    meses_en_que_aparece: g.veces,
+    sin_cargar_desde: desdeCuando(g.mesesDesde),
+  }));
 
   return [
     "Sos el asistente virtual de gestorDIA, la app de gestión de pagos, suscripciones y rendición de cuentas de la Dirección de Inteligencia Artificial de la Municipalidad de San Miguel de Tucumán.",
@@ -165,8 +164,8 @@ async function buildSystemPrompt(path: string | null): Promise<string> {
       ? `PENDIENTE DE RENDIR (${porRendir.length} pagos, de cualquier período): todavía no se le entregaron al contador. "le_falta" dice qué datos hay que completar para que los acepte (vacío = listo). Usá esto si preguntan qué falta rendir: ${JSON.stringify(porRendir)}`
       : "PENDIENTE DE RENDIR: nada, está todo entregado.",
     sinRepetir.length > 0
-      ? `SE PAGÓ EL MES PASADO Y ESTE MES TODAVÍA NO (${sinRepetir.length}): candidatos a repetir. OJO: no es una deuda ni un vencimiento, puede que este mes no corresponda, y el monto casi seguro cambió. Si preguntan qué falta cargar, mencionalos y aclarales que se cargan con el botón "↻ Repetir" del dashboard: ${JSON.stringify(sinRepetir)}`
-      : "SE PAGÓ EL MES PASADO Y ESTE MES TODAVÍA NO: nada, ya se cargó todo lo del mes pasado.",
+      ? `SE VIENE PAGANDO Y ESTE MES TODAVÍA NO SE CARGÓ (${sinRepetir.length}, mirando los últimos ${VENTANA_MESES} meses): candidatos a repetir. "monto_de_esa_vez" es lo que se pagó la última vez, NO lo que hay que pagar: el importe cambia casi siempre, así que nunca lo des como el monto de este mes. "meses_en_que_aparece" alto = gasto habitual; "sin_cargar_desde" con 2+ meses = se viene salteando. Tampoco es una deuda ni un vencimiento: puede que este mes no corresponda. Si preguntan qué falta cargar, mencionalos y aclarales que se cargan con el botón "↻ Repetir" del dashboard: ${JSON.stringify(sinRepetir)}`
+      : "SE VIENE PAGANDO Y ESTE MES TODAVÍA NO SE CARGÓ: nada, está todo cargado.",
     `Categorías: ${JSON.stringify(categories.map((c) => c.name))}`,
     `Servicios: ${JSON.stringify(servicios)}`,
     `Pagos (${pagos.length} más recientes): ${JSON.stringify(pagos)}`,

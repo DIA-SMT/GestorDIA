@@ -6,7 +6,8 @@ import {
   listPaymentsBetween,
   recentPayments as fetchRecent,
 } from "@/lib/data";
-import { formatMoney, formatDate, toARS, todayISO, monthLabel, prevMonth, claveDeGasto } from "@/lib/utils";
+import { formatMoney, formatDate, toARS, todayISO, monthLabel, shiftMonth, monthOf } from "@/lib/utils";
+import { gastosSinCargarEsteMes, desdeCuando, VENTANA_MESES } from "@/lib/gastos-habituales";
 import { PaymentStatusBadge, CategoryTag } from "@/components/badges";
 import KpiCards, { type KpiDef } from "@/components/kpi-cards";
 import { resumirPreparacion } from "@/lib/rendicion-status";
@@ -19,14 +20,14 @@ export const dynamic = "force-dynamic";
 export default async function DashboardPage() {
   const mes = todayISO().slice(0, 7);
   const monthStart = `${mes}-01`;
-  const anterior = prevMonth(mes);
 
-  const [monthPayments, services, recientes, pendientes, delMesPasado] = await Promise.all([
+  const [monthPayments, services, recientes, pendientes, ventana] = await Promise.all([
     monthPaidPayments(monthStart),
     listServices(),
     fetchRecent(8),
     listPendientesDeRendir(),
-    listPaymentsBetween(`${anterior}-01`, monthStart),
+    // Ventana de varios meses + el mes actual, en una sola consulta
+    listPaymentsBetween(`${shiftMonth(mes, -VENTANA_MESES)}-01`, `${shiftMonth(mes, 1)}-01`),
   ]);
 
   // Gasto del mes en ARS (suma de equivalentes)
@@ -47,12 +48,15 @@ export default async function DashboardPage() {
   const arrastres = porRendir.filter((p) => p.payment_date.slice(0, 7) < mes).length;
   const activos = services.filter((s) => s.status === "active");
 
-  // Gastos del mes pasado que todavía no se repitieron este mes. Como ahora
-  // cada gasto se carga a mano, esto es el recordatorio: "esto lo pagaste en
-  // julio y en agosto todavía no aparece". Se compara por proveedor+descripción,
-  // que es lo que identifica al gasto cuando el monto cambia todos los meses.
-  const yaCargados = new Set(monthPayments.map(claveDeGasto));
-  const sinRepetir = dedupe(delMesPasado.filter((p) => p.status === "paid" && !yaCargados.has(claveDeGasto(p))));
+  // Lo que venís pagando y este mes todavía no cargaste. Como los gastos ya no
+  // se generan solos, este es el recordatorio — con el monto REAL de la última
+  // vez, no con una estimación.
+  const habituales = gastosSinCargarEsteMes({
+    historial: ventana.filter((p) => monthOf(p.payment_date) < mes),
+    delMesActual: ventana.filter((p) => monthOf(p.payment_date) === mes),
+    mesActual: mes,
+    serviciosCancelados: new Set(services.filter((s) => s.status === "cancelled").map((s) => s.id)),
+  });
 
   return (
     <div style={{ display: "grid", gap: "2.25rem" }}>
@@ -115,43 +119,68 @@ export default async function DashboardPage() {
         ] satisfies KpiDef[]}
       />
 
-      {/* Gastos del mes pasado que todavía no se repitieron este mes */}
-      {sinRepetir.length > 0 && (
+      {/* Lo que venís pagando y este mes todavía no cargaste */}
+      {habituales.length > 0 && (
         <section className="card" style={{ padding: "1.75rem" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem", flexWrap: "wrap", gap: "0.5rem" }}>
             <h2 style={{ fontSize: "1.05rem", fontWeight: 600 }}>
-              Pagaste esto en {monthLabel(anterior)} y todavía no en {monthLabel(mes)}
+              Venís pagando esto y en {monthLabel(mes)} todavía no lo cargaste
             </h2>
             <Link href="/pagos" style={{ fontSize: "0.85rem", color: "var(--primary)" }}>Ver pagos →</Link>
           </div>
           <p className="muted" style={{ fontSize: "0.8rem", marginBottom: "1rem" }}>
-            No es una alerta: puede que este mes no corresponda. “Repetir” abre el formulario con los mismos datos y
-            la fecha de hoy, para que solo ajustes el monto.
+            El monto es <strong style={{ color: "var(--text)" }}>el de la última vez</strong>, no una estimación: casi
+            siempre cambia. “Repetir” abre el formulario con todos los datos cargados y la fecha de hoy, para que
+            solo corrijas el importe.
           </p>
           <div style={{ display: "grid", gap: "0.5rem" }}>
-            {sinRepetir.map((p) => (
-              <div key={p.id} style={rowStyle}>
-                <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0 }}>
-                  <Link href={`/pagos/${p.id}`} style={{ fontWeight: 500, color: "var(--text)" }}>
-                    {p.description || p.service?.name || p.provider || "Pago"}
-                  </Link>
-                  {p.category && <CategoryTag name={p.category.name} color={p.category.color} />}
+            {habituales.map((g) => {
+              const p = g.pago;
+              const atrasado = g.mesesDesde >= 2;
+              return (
+                <div
+                  key={p.id}
+                  style={{
+                    ...rowStyle,
+                    ...(atrasado
+                      ? { background: "rgba(251,191,36,.06)", border: "1px solid rgba(251,191,36,.18)" }
+                      : null),
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", minWidth: 0, flexWrap: "wrap" }}>
+                    <Link href={`/pagos/${p.id}`} style={{ fontWeight: 500, color: "var(--text)" }}>
+                      {p.description || p.service?.name || p.provider || "Pago"}
+                    </Link>
+                    {p.category && <CategoryTag name={p.category.name} color={p.category.color} />}
+                    {g.habitual && (
+                      <span className="badge" style={{ background: "rgba(148,163,184,.12)", color: "var(--text-muted)" }}>
+                        {g.veces} de los últimos {VENTANA_MESES} meses
+                      </span>
+                    )}
+                    {atrasado && (
+                      <span className="badge" style={{ background: "rgba(251,191,36,.15)", color: "#fbbf24" }}>
+                        sin cargar desde {desdeCuando(g.mesesDesde)}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "1rem", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                      última vez el {formatDate(g.ultimaFecha)}
+                    </span>
+                    <span style={{ fontWeight: 600, minWidth: 90, textAlign: "right" }}>
+                      {formatMoney(g.ultimoMonto, p.currency)}
+                    </span>
+                    <Link
+                      href={`/pagos/nuevo?repetir=${p.id}`}
+                      className="btn btn-primary"
+                      style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
+                    >
+                      ↻ Repetir
+                    </Link>
+                  </div>
                 </div>
-                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                  <span style={{ fontSize: "0.8rem", color: "var(--text-muted)" }}>{formatDate(p.payment_date)}</span>
-                  <span style={{ fontWeight: 600, minWidth: 90, textAlign: "right" }}>
-                    {formatMoney(p.amount, p.currency)}
-                  </span>
-                  <Link
-                    href={`/pagos/nuevo?repetir=${p.id}`}
-                    className="btn btn-primary"
-                    style={{ padding: "0.3rem 0.7rem", fontSize: "0.78rem" }}
-                  >
-                    ↻ Repetir
-                  </Link>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       )}
@@ -199,20 +228,6 @@ export default async function DashboardPage() {
       </section>
     </div>
   );
-}
-
-// Un mismo gasto puede tener varios pagos el mes pasado; para sugerir repetir
-// alcanza con uno por proveedor+descripción.
-function dedupe(pagos: Payment[]): Payment[] {
-  const vistos = new Set<string>();
-  const out: Payment[] = [];
-  for (const p of pagos) {
-    const k = claveDeGasto(p);
-    if (vistos.has(k)) continue;
-    vistos.add(k);
-    out.push(p);
-  }
-  return out;
 }
 
 const rowStyle: React.CSSProperties = {

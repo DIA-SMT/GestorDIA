@@ -67,10 +67,17 @@ proveedor, CUIT, tipo de comprobante— con la fecha en **hoy** y el **N° de
 comprobante vacío**, porque cambia en cada factura y arrastrarlo sería rendir un
 número que no corresponde.
 
-El dashboard cierra el circuito: lista **lo que se pagó el mes pasado y este mes
-todavía no**, comparando por proveedor + descripción. No es una alerta de
-vencimiento —puede que este mes no corresponda— sino el recordatorio de qué
-falta cargar, cada uno con su botón de repetir.
+El dashboard cierra el circuito: lista **lo que venís pagando y este mes todavía
+no cargaste**, cada uno con su botón de repetir. Mira una ventana de **4 meses**
+y no solo el mes anterior — con una ventana de un mes, un mes que te salteás, un
+servicio bimestral o un gasto que se viene arrastrando desaparecen justo cuando
+más falta hace el recordatorio. Muestra **lo que se pagó la última vez** (dato
+real, no estimación), un badge en los que aparecen en varios meses y un aviso
+ámbar en los que hace 2+ meses que no se cargan.
+
+No es una alerta de vencimiento: puede que este mes no corresponda. La identidad
+del gasto ignora el período de la descripción, así "Claude Pro — Mayo" y "Claude
+Pro — Agosto" cuentan como el mismo gasto en meses distintos.
 
 > Las columnas del esquema viejo (`billing_cycle`, `next_renewal_date`,
 > `expected_amount`, `payment_mode`, `billing_anchor_day`, `payments.cycle_date`)
@@ -142,8 +149,9 @@ y contraseña (Supabase Auth). Cada persona del equipo se crea su cuenta.
 ## Funcionalidades
 
 - **Repetir un gasto**: botón `↻` en cada pago. Precarga todo lo que se mantiene
-  mes a mes y limpia lo que no (fecha en hoy, N° de comprobante en blanco). El
-  dashboard lista lo que se pagó el mes pasado y este mes todavía no.
+  mes a mes y limpia lo que no (fecha en hoy, N° de comprobante en blanco), y
+  corre el período de la descripción. El dashboard lista lo que venís pagando y
+  este mes todavía no cargaste, mirando los últimos 4 meses.
 - **Dashboard** con gasto del mes (ARS y USD), pendiente de rendir, cuántos pagos
   están sin factura y servicios activos. Cada KPI se abre y muestra qué lo compone.
 - **Pagos**: alta con monto + moneda + cotización, cálculo automático del equivalente
